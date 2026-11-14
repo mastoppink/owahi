@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Lapis Photo Editor</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<header id="menubar">
+  <div class="brand">Lapis</div>
+  <nav id="menus"></nav>
+  <div class="spacer"></div>
+  <span id="saveStat" class="savestat" aria-live="polite"></span>
+  <button id="undoBtn" class="icon-btn" title="Undo (Ctrl+Z)" aria-label="Undo">↶</button>
+  <button id="redoBtn" class="icon-btn" title="Redo (Ctrl+Shift+Z)" aria-label="Redo">↷</button>
+  <button id="sideToggle" class="btn mobile-only">Panel</button>
+</header>
+<div id="options"></div>
+<main>
+  <aside id="tools"></aside>
+  <section id="stage">
+    <canvas id="view"></canvas>
+    <div id="empty">
+      <div>
+        <h1>Lapis</h1>
+        <p class="muted">Editor foto berbasis layer, jalan langsung di browser.</p>
+        <div class="empty-actions">
+          <button class="btn primary" id="emptyOpen">Buka foto</button>
+          <button class="btn" id="emptyNew">Dokumen baru</button>
+        </div>
+        <p class="muted small">Atau seret file ke sini, atau tempel (Ctrl+V).</p>
+      </div>
+    </div>
+    <div id="status"></div>
+  </section>
+  <aside id="side">
+    <div class="panel"><h3>Properti</h3><div id="props"></div></div>
+    <div class="panel paths"><h3>Path</h3><div id="paths"></div><div id="pathBtns"></div></div>
+    <div class="panel grow"><h3>Layer</h3><div id="layers"></div><div id="layerBtns"></div></div>
+  </aside>
+</main>
+
+<div id="modal" hidden>
+  <div class="box" role="dialog" aria-modal="true">
+    <h2></h2>
+    <div class="body"></div>
+    <div class="foot"><button class="btn cancel">Batal</button><button class="btn primary ok">OK</button></div>
+  </div>
+</div>
+<div id="busy" hidden><div class="spin"></div><span></span></div>
+<div id="toast" role="status"></div>
+<input type="file" id="fileIn" accept="image/*" hidden>
+<input type="file" id="projIn" accept=".lapis,.json,application/json" hidden>
+
+<script src="js/util.js"></script>
+<script src="js/core.js"></script>
+<script src="js/adjust.js"></script>
+<script src="js/select.js"></script>
+<script src="js/heal.js"></script>
+<script src="js/upscale.js"></script>
+<script src="js/tools.js"></script>
+<script src="js/paths.js"></script>
+<script src="js/ui.js"></script>
+<script src="js/actions.js"></script>
+<script src="js/autosave.js"></script>
+<script src="js/main.js"></script>
+</body>
+</html>
