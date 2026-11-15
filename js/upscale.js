@@ -6,11 +6,14 @@
 const UP_TARGETS = [
   ['4k', '4K UHD (sisi panjang 3840 px)'], ['4kd', '4K DCI (sisi panjang 4096 px)'], ['2k', 'QHD (sisi panjang 2560 px)'],
   ['x2', '2× ukuran sekarang'], ['x4', '4× ukuran sekarang'],
+  ['enh', 'Perjelas · ukuran tetap (detail lebih tajam)'],
+  ['deblur', 'Hilangkan blur · ukuran tetap (MAXIM, ~88 MB, lambat)'],
 ];
 const UP_MAX_SIDE = 8192, UP_MAX_PX = 40e6;
 let upCancel = false;
 
 function upTarget(t, w, h) {
+  if (t === 'enh' || t === 'deblur') return { f: 1, w, h, enh: true, deblur: t === 'deblur' };
   const long = Math.max(w, h);
   const goal = { '4k': 3840, '4kd': 4096, '2k': 2560 }[t];
   let f = goal ? goal / long : t === 'x2' ? 2 : 4;
@@ -40,10 +43,16 @@ function hasAlpha(c) {
    Model dimuat dari CDN saat pertama dipakai lalu di-cache browser.
    rrdn = arsitektur besar (butuh custom layer), input/output 0..1; rdn = kecil, 0..255. */
 const UP_MODELS = {
+  // native: diproses realesrgan-ncnn-vulkan lewat server.js (jauh lebih cepat); muncul hanya bila server & binary tersedia
+  nx4: { name: 'Native GPU · Real-ESRGAN x4plus (tercepat, foto)', native: 'x4plus', scales: [4], hidden: true },
+  nanime: { name: 'Native GPU · Real-ESRGAN anime/ilustrasi', native: 'anime', scales: [4], hidden: true },
+  nvid: { name: 'Native GPU · Real-ESR general 2×/3×/4× (ringan)', native: 'video', scales: [2, 3, 4], hidden: true },
   thick: { name: 'Kualitas terbaik · ESRGAN thick (~28 MB)', pkg: '@upscalerjs/esrgan-thick@1.0.0', scales: [2, 3, 4, 8], rrdn: true, path: s => `models/x${s}/model.json` },
   gans: { name: 'Tekstur tajam · ESRGAN GAN (~4 MB)', pkg: '@upscalerjs/esrgan-legacy@1.0.0', scales: [4], rrdn: true, path: () => 'models/gans/model.json' },
   medium: { name: 'Sedang · ESRGAN medium (~5 MB)', pkg: '@upscalerjs/esrgan-medium@1.0.0', scales: [2, 3, 4, 8], rrdn: false, path: s => `models/x${s}/model.json` },
   slim: { name: 'Cepat · ESRGAN slim (~1 MB)', pkg: '@upscalerjs/esrgan-slim@1.0.0', scales: [2, 3, 4, 8], rrdn: false, path: s => `models/x${s}/model.json` },
+  // MAXIM deblur (dataset GoPro): graph model 1×, input/output 0..1, sisi harus kelipatan 64
+  maxim: { name: 'Deblur · MAXIM (~88 MB)', pkg: '@upscalerjs/maxim-deblurring@0.1.0', scales: [1], rrdn: true, graph: true, div: 64, ov: 32, hidden: true, path: () => 'models/model.json' },
 };
 const upCache = {};
 function loadScript(src) {
@@ -56,7 +65,16 @@ function loadScript(src) {
 async function loadTf() {
   if (!window.tf) await loadScript('https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js');
   if (!upCache.backend) {
-    try { await tf.setBackend('webgl'); } catch { await tf.setBackend('cpu'); }
+    // WebGPU jauh lebih cepat dari WebGL bila tersedia; fallback ke WebGL lalu CPU
+    if (navigator.gpu) {
+      try {
+        if (!tf.findBackend('webgpu')) await loadScript('https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-webgpu@4.22.0/dist/tf-backend-webgpu.min.js');
+        if (!(await tf.setBackend('webgpu'))) throw 0;
+      } catch { /* lanjut ke WebGL */ }
+    }
+    if (tf.getBackend() !== 'webgpu') {
+      try { if (!(await tf.setBackend('webgl'))) throw 0; } catch { await tf.setBackend('cpu'); }
+    }
     await tf.ready();
     upCache.backend = tf.getBackend();
   }
@@ -82,14 +100,25 @@ async function loadTf() {
 }
 async function loadUpModel(kind, scale) {
   const m = UP_MODELS[kind], key = kind + scale;
-  if (!upCache[key]) upCache[key] = await tf.loadLayersModel(`https://cdn.jsdelivr.net/npm/${m.pkg}/${m.path(scale)}`);
+  const url = `https://cdn.jsdelivr.net/npm/${m.pkg}/${m.path(scale)}`;
+  if (m.graph && !upCache.maximOps) {
+    // op kustom MAXIM (sama seperti di paket UpscalerJS)
+    tf.registerOp('ScaleAndTranslate', ({ inputs }) => tf.tidy(() => {
+      const [hh, ww] = Array.from(inputs[1].dataSync());
+      return tf.image.resizeNearestNeighbor(inputs[0], [hh, ww]);
+    }));
+    upCache.maximOps = true;
+  }
+  if (!upCache[key]) upCache[key] = await (m.graph ? tf.loadGraphModel(url) : tf.loadLayersModel(url));
   return upCache[key];
 }
 
 /* Rencana pass: utamakan model 4× lalu langsung perkecil ke target (supersampling = lebih tajam).
    Tiap langkah: { s: skala model, out: skala hasil langkah itu }. */
-function upPlan(f, kind) {
+function upPlan(f, kind, enh) {
   const sc = UP_MODELS[kind].scales, steps = [];
+  // mode Perjelas: satu pass model 2× (cukup, karena hasil langsung diperkecil ke ukuran asli)
+  if (enh) return [{ s: sc.includes(2) ? 2 : Math.min(...sc), out: 1 }];
   let r = f;
   while (r > 1.001 && steps.length < 3) {
     const s = sc.includes(4) ? 4 : Math.max(...sc);
@@ -102,7 +131,7 @@ function upPlan(f, kind) {
 /* Satu pass bertile. Tiap tile: (opsional) rata-rata beberapa orientasi (TTA), buang overlap,
    lalu langsung digambar di skala `outF` sehingga tidak perlu kanvas raksasa 4×. */
 async function esrganPass(src, model, o, onTile) {
-  const { s: scale, out: outF } = o.step, rr = o.rrdn, tile = o.tile, ov = o.overlap;
+  const { s: scale, out: outF } = o.step, rr = o.rrdn, div = o.div || 1, tile = o.tile, ov = o.overlap;
   const w = src.width, h = src.height, W = Math.round(w * outF), H = Math.round(h * outF);
   const out = mk(W, H), og = cx(out), sd = cx(src);
   og.imageSmoothingEnabled = true; og.imageSmoothingQuality = 'high';
@@ -112,13 +141,19 @@ async function esrganPass(src, model, o, onTile) {
   for (let ty = 0; ty < rows; ty++) for (let tx = 0; tx < cols; tx++) {
     if (upCancel) throw new Error('Dibatalkan');
     const x0 = tx * tile, y0 = ty * tile, x1 = Math.min(w, x0 + tile), y1 = Math.min(h, y0 + tile);
-    const px0 = Math.max(0, x0 - ov), py0 = Math.max(0, y0 - ov), px1 = Math.min(w, x1 + ov), py1 = Math.min(h, y1 + ov);
-    const pw = px1 - px0, ph = py1 - py0, d = sd.getImageData(px0, py0, pw, ph).data, rgb = new Float32Array(pw * ph * 3);
+    // jendela berukuran tetap (digeser ke dalam di tepi) agar shape tensor selalu sama → shader GPU tidak dikompilasi ulang
+    const PW = Math.min(w, tile + 2 * ov), PH = Math.min(h, tile + 2 * ov);
+    const px0 = Math.max(0, Math.min(x0 - ov, w - PW)), py0 = Math.max(0, Math.min(y0 - ov, h - PH));
+    const pw = PW, ph = PH, d = sd.getImageData(px0, py0, pw, ph).data, rgb = new Float32Array(pw * ph * 3);
     const k0 = rr ? 1 / 255 : 1;
     for (let k = 0, j = 0; k < d.length; k += 4) { rgb[j++] = d[k] * k0; rgb[j++] = d[k + 1] * k0; rgb[j++] = d[k + 2] * k0; }
     const y = tf.tidy(() => {
-      const x = tf.tensor4d(rgb, [1, ph, pw, 3]);
-      const outs = views.map(ax => { const p = model.predict(ax.length ? tf.reverse(x, ax) : x); return ax.length ? tf.reverse(p, ax) : p; });
+      let x = tf.tensor4d(rgb, [1, ph, pw, 3]);
+      // model dengan syarat kelipatan (MAXIM): pad cermin, lalu potong kembali setelah prediksi
+      const eh = Math.ceil(ph / div) * div - ph, ew = Math.ceil(pw / div) * div - pw;
+      if (eh || ew) { const pd = [[0, 0], [0, eh], [0, ew], [0, 0]]; x = eh <= ph && ew <= pw ? tf.mirrorPad(x, pd, 'symmetric') : tf.pad(x, pd); }
+      const run = v => { let p = model.predict(v); if (Array.isArray(p)) p = p[p.length - 1]; return eh || ew ? tf.slice(p, [0, 0, 0, 0], [1, ph * scale, pw * scale, 3]) : p; };
+      const outs = views.map(ax => (ax.length ? tf.reverse(run(tf.reverse(x, ax)), ax) : run(x)));
       let r = outs.length > 1 ? tf.div(tf.addN(outs), outs.length) : outs[0];
       if (rr) r = tf.mul(r, 255);
       return r.clipByValue(0, 255);
@@ -133,52 +168,103 @@ async function esrganPass(src, model, o, onTile) {
     const dx = Math.round(x0 * outF), dy = Math.round(y0 * outF), dw = Math.round(x1 * outF) - dx, dh = Math.round(y1 * outF) - dy;
     og.drawImage(upCache.tc, (x0 - px0) * scale, (y0 - py0) * scale, (x1 - x0) * scale, (y1 - y0) * scale, dx, dy, dw, dh);
     onTile(++i, n);
-    await tf.nextFrame();
   }
   return out;
 }
 
 /* Jalankan semua pass satu model. */
+/* ================= Native (server.js + realesrgan-ncnn-vulkan) ================= */
+let upNative = null;
+async function nativeCheck() {
+  if (upNative) return upNative;
+  if (!/^https?:$/.test(location.protocol)) return (upNative = { available: false });
+  try {
+    const r = await fetch('/api/native', { cache: 'no-store' });
+    upNative = r.ok ? await r.json() : { available: false };
+  } catch { upNative = { available: false }; }
+  return upNative;
+}
+async function nativePass(src, model, step, tta) {
+  const blob = await new Promise(ok => src.toBlob(ok, 'image/png'));
+  const ac = new AbortController(), iv = setInterval(() => upCancel && ac.abort(), 200);
+  try {
+    const r = await fetch(`/api/upscale?model=${model}&scale=${step.s}&tta=${tta > 1 ? 1 : 0}`, { method: 'POST', body: blob, signal: ac.signal });
+    if (!r.ok) { let e = r.statusText; try { e = (await r.json()).error; } catch {} throw new Error('Upscale native gagal: ' + e); }
+    const bmp = await createImageBitmap(await r.blob()), c = mk(bmp.width, bmp.height);
+    cx(c).drawImage(bmp, 0, 0); bmp.close();
+    return step.out < step.s ? resizeSharp(c, Math.round(src.width * step.out), Math.round(src.height * step.out)) : c;
+  } catch (e) {
+    if (upCancel) throw new Error('Dibatalkan');
+    throw e;
+  } finally { clearInterval(iv); }
+}
+
 async function esrganRun(src, kind, t, opts, label, msg) {
-  const m = UP_MODELS[kind], steps = upPlan(t.f, kind);
+  const m = UP_MODELS[kind], steps = upPlan(t.f, kind, t.enh);
   let cur = src;
   for (let k = 0; k < steps.length; k++) {
+    if (m.native) {
+      msg.textContent = `${label}pass ${k + 1}/${steps.length} · Real-ESRGAN ${steps[k].s}× di GPU native…`;
+      cur = await nativePass(cur, m.native, steps[k], opts.tta);
+      continue;
+    }
     msg.textContent = `Memuat model ${m.name.split(' · ')[1] || kind} ${steps[k].s}×… (pertama kali agak lama)`;
     const model = await loadUpModel(kind, steps[k].s);
-    cur = await esrganPass(cur, model, { ...opts, step: steps[k], rrdn: m.rrdn }, (i, n) => {
-      msg.textContent = `${label}pass ${k + 1}/${steps.length} · tile ${i}/${n} · ${Math.round(i / n * 100)}% · ${upCache.backend === 'webgl' ? 'GPU' : 'CPU (lambat)'}${opts.tta > 1 ? ' · TTA ' + opts.tta + '×' : ''}`;
+    cur = await esrganPass(cur, model, { ...opts, step: steps[k], rrdn: m.rrdn, div: m.div, overlap: m.ov ?? opts.overlap }, (i, n) => {
+      msg.textContent = `${label}pass ${k + 1}/${steps.length} · tile ${i}/${n} · ${Math.round(i / n * 100)}% · ${upCache.backend === 'cpu' ? 'CPU (lambat)' : 'GPU ' + upCache.backend}${opts.tta > 1 ? ' · TTA ' + opts.tta + '×' : ''}`;
     });
   }
   return resizeSharp(cur, t.w, t.h);
 }
 
 /* ================= Dialog & alur utama ================= */
-function upscaleDialog() {
+async function upscaleDialog() {
   if (!D) return;
+  const nat = await nativeCheck();
   const tSel = el('select', {}, ...UP_TARGETS.map(([v, t]) => el('option', { value: v }, t)));
-  const keepCb = el('input', { type: 'checkbox', checked: true });
-  const lModel = el('select', {}, ...Object.entries(UP_MODELS).map(([k, m]) => el('option', { value: k }, m.name)));
-  const lTta = el('select', {}, el('option', { value: 1 }, 'Normal'), el('option', { value: 2, selected: true }, 'Tinggi · rata-rata 2 orientasi (2× lebih lama)'), el('option', { value: 4 }, 'Maksimal · 4 orientasi (4× lebih lama)'));
-  const lTile = el('select', {}, el('option', { value: 64 }, '64 px (GPU lemah / HP)'), el('option', { value: 96, selected: true }, '96 px'), el('option', { value: 128 }, '128 px'), el('option', { value: 192 }, '192 px (GPU kuat)'));
-  let gan = 0, sharpen = 0;
+  const keepCb = el('input', { type: 'checkbox' });
+  // Perjelas/Deblur bisa diterapkan ke layer piksel aktif saja (ukuran tetap, layer lain tak tersentuh)
+  const al = AL(), canLayer = !!(al && al.type === 'pixel' && al.canvas);
+  const scopeSel = el('select', {}, el('option', { value: 'all' }, 'Gambar gabungan (semua layer dilebur)'),
+    el('option', { value: 'layer', disabled: !canLayer, selected: canLayer }, canLayer ? `Layer aktif saja · ${al.name}` : 'Layer aktif saja (pilih layer piksel dulu)'));
+  const lModel = el('select', {}, ...Object.entries(UP_MODELS).filter(([, m]) => (m.native ? nat.available : !m.hidden)).map(([k, m]) => el('option', { value: k }, m.name)));
+  const lTta = el('select', {}, el('option', { value: 1, selected: true }, 'Normal (tercepat)'), el('option', { value: 2 }, 'Tinggi · rata-rata 2 orientasi (2× lebih lama)'), el('option', { value: 4 }, 'Maksimal · 4 orientasi (4× lebih lama)'));
+  const lTile = el('select', {}, el('option', { value: 64 }, '64 px (GPU lemah / HP)'), el('option', { value: 96 }, '96 px'), el('option', { value: 128 }, '128 px'), el('option', { value: 192, selected: true }, '192 px (disarankan)'), el('option', { value: 256 }, '256 px (GPU kuat, tercepat)'));
+  let gan = 0, sharpen = 0, strength = 100, detail = 80;
   const info = el('p', { class: 'muted small' });
   const upd = () => {
     const t = upTarget(tSel.value, D.w, D.h);
-    ganRow.hidden = lModel.value === 'gans';
+    modelRow.hidden = t.deblur;
+    const isNat = !t.deblur && !!UP_MODELS[lModel.value].native;
+    ganRow.hidden = lModel.value === 'gans' || t.deblur || isNat; // Real-ESRGAN sudah model GAN
+    tileRow.hidden = isNat; // ncnn mengatur tile sendiri
+    strRow.hidden = detRow.hidden = scopeRow.hidden = !t.enh;
+    if (t.deblur) {
+      info.textContent = `${D.w}×${D.h} px tetap. Model MAXIM menghilangkan blur goyang/gerak (dilatih pada dataset GoPro). Model ~88 MB diunduh sekali lalu di-cache; prosesnya jauh lebih berat dari ESRGAN, pakai tile kecil bila GPU lemah${strength < 100 ? `. Dicampur ${100 - strength}% foto asli` : ''}. Diproses di perangkat ini.`;
+      return;
+    }
+    if (t.enh) {
+      info.textContent = `${D.w}×${D.h} px tetap. Model ${upPlan(1, lModel.value, true)[0].s}× lalu diperkecil kembali ke ukuran asli: tepi lebih bersih, noise/artefak JPEG berkurang${gan && lModel.value !== 'gans' ? ' + campuran GAN ' + gan + '%' : ''}${strength < 100 ? `, dicampur ${100 - strength}% foto asli` : ''}. Diproses di perangkat ini.`;
+      return;
+    }
     if (t.f <= 1.001) { info.textContent = `Gambar (${D.w}×${D.h}) sudah sebesar atau lebih besar dari target.`; return; }
     info.textContent = `${D.w}×${D.h} → ${t.w}×${t.h} px. Model ${upPlan(t.f, lModel.value).map(s => s.s + '×').join(' lalu ')} lalu diperkecil ke target (supersampling)${gan && lModel.value !== 'gans' ? ' + campuran GAN ' + gan + '%' : ''}. Diproses di perangkat ini, tidak dikirim ke mana pun.`;
   };
+  const modelRow = row('Model', lModel), scopeRow = row('Terapkan ke', scopeSel);
+  const tileRow = row('Ukuran tile', lTile);
+  const detRow = slider('Detail', detail, 0, 200, 5, v => { detail = v; }, '%');
+  const strRow = slider('Kekuatan', strength, 0, 100, 5, v => { strength = v; upd(); }, '%');
   const ganRow = slider('Campur tekstur GAN', gan, 0, 100, 5, v => { gan = v; upd(); }, '%');
   [tSel, lModel].forEach(s => s.addEventListener('change', upd));
   upd();
-  const body = el('div', {}, row('Target', tSel), row('Model', lModel), ganRow, row('Kualitas', lTta), row('Ukuran tile', lTile),
+  const body = el('div', {}, row('Target', tSel), scopeRow, modelRow, detRow, strRow, ganRow, row('Kualitas', lTta), tileRow,
     slider('Tajamkan akhir', sharpen, 0, 100, 1, v => { sharpen = v; }, '%'),
     el('label', { class: 'chk' }, keepCb, 'Simpan foto asli sebagai layer pembanding (tersembunyi)'), info,
     el('p', { class: 'muted small' }, 'Campur tekstur GAN: model GAN ikut dijalankan lalu hasilnya dipadukan, untuk tekstur lebih tajam (waktu ~2×). Semua layer digabung lalu diperbesar. Bisa di-undo.'));
   modal('AI Upscale', body, () => {
     const t = upTarget(tSel.value, D.w, D.h);
-    if (t.f <= 1.001) { toast('Pilih target yang lebih besar dari gambar sekarang.'); return false; }
-    const opts = { t, sharpen, keep: keepCb.checked, model: lModel.value, tile: +lTile.value, tta: +lTta.value, gan: lModel.value === 'gans' ? 0 : gan };
+    if (!t.enh && t.f <= 1.001) { toast('Pilih target yang lebih besar dari gambar sekarang.'); return false; }
+    const opts = { t, layer: t.enh && scopeSel.value === 'layer' ? al : null, sharpen, strength, detail, keep: keepCb.checked, model: t.deblur ? 'maxim' : lModel.value, tile: +lTile.value, tta: +lTta.value, gan: lModel.value === 'gans' || t.deblur || UP_MODELS[lModel.value].native ? 0 : gan };
     setTimeout(() => runUpscale(opts), 0);
   }, 'Upscale');
 }
@@ -191,19 +277,39 @@ async function runUpscale(o) {
   await busy('Menyiapkan…', async () => {
     b.append(cancel);
     try {
-      const src = composite(), alpha = hasAlpha(src);
-      msg.textContent = 'Memuat TensorFlow.js…';
-      await loadTf();
+      const L = o.layer && D.layers.includes(o.layer) ? o.layer : null;
+      const src = L ? L.canvas : composite(), alpha = hasAlpha(src);
+      if (L) t.w = src.width, t.h = src.height;
+      if (!UP_MODELS[o.model].native || o.gan) { msg.textContent = 'Memuat TensorFlow.js…'; await loadTf(); }
       const opts = { tile: o.tile, overlap: UP_MODELS[o.model].rrdn ? 24 : 16, tta: o.tta };
       let out = await esrganRun(src, o.model, t, opts, o.gan ? 'Model utama · ' : '', msg);
       if (o.gan) {
         const g = await esrganRun(src, 'gans', t, opts, 'Tekstur GAN · ', msg);
         const og = cx(out); og.globalAlpha = o.gan / 100; og.drawImage(g, 0, 0); og.globalAlpha = 1;
       }
+      if (t.enh && o.strength < 100) {
+        // campur dengan foto asli agar hasil tidak terlihat 'plastik'
+        const og = cx(out); og.globalAlpha = 1 - o.strength / 100; og.drawImage(src, 0, 0); og.globalAlpha = 1;
+      }
+      // AI menghaluskan noise; setelah bersih, tepi & tekstur bisa dipertajam tanpa ikut menajamkan noise
+      if (t.enh && o.detail > 0) out = applyFilter(out, { kind: 'sharpen', amount: o.detail, radius: 1, threshold: 2 });
       if (o.sharpen > 0) out = applyFilter(out, { kind: 'sharpen', amount: o.sharpen });
       if (alpha) { const a = mk(t.w, t.h), ag = cx(a); ag.imageSmoothingQuality = 'high'; ag.drawImage(src, 0, 0, t.w, t.h); maskInto(out, a); }
-      pushH('AI Upscale');
-      const l = newLayer('pixel', 'Upscale ' + t.w + '×' + t.h);
+      if (L) {
+        // hanya layer aktif yang diganti; adjustment, teks, mask & layer lain tetap utuh
+        pushH((t.deblur ? 'AI Deblur' : 'AI Perjelas') + ' (layer)');
+        if (o.keep) {
+          const ref = newLayer('pixel', L.name + ' · asli', { visible: false });
+          ref.canvas = cloneCanvas(src);
+          D.layers.splice(D.layers.indexOf(L), 0, ref);
+        }
+        L.canvas = out; D.active = D.layers.indexOf(L); S.editMask = false;
+        touch(L); refreshAll();
+        toast(`Selesai: layer "${L.name}" dalam ${Math.round((performance.now() - t0) / 1000)} detik.`);
+        return;
+      }
+      pushH(t.deblur ? 'AI Deblur' : t.enh ? 'AI Perjelas' : 'AI Upscale');
+      const l = newLayer('pixel', t.deblur ? 'Deblur AI' : t.enh ? 'Perjelas AI' : 'Upscale ' + t.w + '×' + t.h);
       l.canvas = out;
       D.layers = [l]; D.active = 0;
       if (o.keep) {
