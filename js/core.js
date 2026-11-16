@@ -181,6 +181,7 @@ function drawLayer(o, l) {
   const w = D.w, h = D.h;
   if (l.type === 'adjust') {
     const id = o.getImageData(0, 0, w, h);
+    if (l.blend === 'source-over') { applyAdjustRun(id, [l], w, h); o.putImageData(id, 0, 0); return; }
     applyAdjust(id, l.adj, w, h);
     const t = mk(w, h);
     cx(t).putImageData(id, 0, 0);
@@ -195,12 +196,43 @@ function drawLayer(o, l) {
   }
   o.globalAlpha = 1; o.globalCompositeOperation = 'source-over';
 }
-function composite() {
-  const out = mk(D.w, D.h), o = cx(out);
-  for (const l of D.layers) if (l.visible) drawLayer(o, l);
+/* upto = jumlah layer dari bawah yang ikut (default semua).
+   Adjustment layer Normal yang berurutan dihitung sekaligus dalam float (lihat applyAdjustRun). */
+function composite(upto = D.layers.length) {
+  const out = mk(D.w, D.h), o = cx(out), L = D.layers;
+  const runnable = l => l.type === 'adjust' && l.blend === 'source-over';
+  for (let i = 0; i < upto; i++) {
+    const l = L[i];
+    if (!l.visible) continue;
+    if (runnable(l)) {
+      const run = [];
+      let j = i;
+      for (; j < upto && (!L[j].visible || runnable(L[j])); j++) if (L[j].visible) run.push(L[j]);
+      const id = o.getImageData(0, 0, D.w, D.h);
+      applyAdjustRun(id, run, D.w, D.h);
+      o.putImageData(id, 0, 0);
+      i = j - 1;
+      continue;
+    }
+    drawLayer(o, l);
+  }
   return out;
 }
-function freshComp() { S.comp = composite(); S.compData = null; return S.comp; }
+function freshComp() { S.comp = composite(); S.compData = null; S.clipC = null; if (S.hists && S.hists.length) updateHists(); return S.comp; }
+
+/* Peringatan clipping: merah = highlight terpotong (≥254), biru = shadow terpotong (≤1) */
+function clipOverlay() {
+  if (S.clipC) return S.clipC;
+  const d = compData().data, o = new ImageData(D.w, D.h), od = o.data;
+  for (let j = 0; j < d.length; j += 4) {
+    if (d[j + 3] < 8) continue;
+    const mx = Math.max(d[j], d[j + 1], d[j + 2]), mn = Math.min(d[j], d[j + 1], d[j + 2]);
+    if (mx >= 254) { od[j] = 255; od[j + 1] = 30; od[j + 2] = 60; od[j + 3] = 255; }
+    else if (mn <= 1 && mx <= 3) { od[j] = 30; od[j + 1] = 120; od[j + 2] = 255; od[j + 3] = 255; }
+  }
+  S.clipC = mk(D.w, D.h); cx(S.clipC).putImageData(o, 0, 0);
+  return S.clipC;
+}
 function compData() { return S.compData || (S.compData = cx(S.comp).getImageData(0, 0, D.w, D.h)); }
 
 let rq = 0, vq = 0;
@@ -325,6 +357,7 @@ function drawView() {
   g.fillStyle = checkerPat; g.fillRect(x, y, w, h);
   g.imageSmoothingEnabled = z < 2; g.imageSmoothingQuality = 'high';
   if (S.comp) g.drawImage(S.comp, x, y, w, h);
+  if (S.comp && S.clip) g.drawImage(clipOverlay(), x, y, w, h);
   g.strokeStyle = 'rgba(0,0,0,.7)'; g.lineWidth = 1; g.strokeRect(x - 0.5, y - 0.5, w + 1, h + 1);
 
   if (S.selPreview) {

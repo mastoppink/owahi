@@ -109,6 +109,63 @@ function blurCanvas(c, radius) {
   return out;
 }
 
+/* ---------- Resize Lanczos-3 (separable, alpha premultiplied) ----------
+   Lebih tajam daripada bilinear browser, tanpa aliasing saat memperkecil. */
+function lzWeights(sn, dn) {
+  const sc = dn / sn, fs = sc < 1 ? 1 / sc : 1, sup = 3 * fs, taps = Math.ceil(sup) * 2 + 1;
+  const start = new Int32Array(dn), wt = new Float32Array(dn * taps);
+  const sinc = x => { if (x === 0) return 1; const p = Math.PI * x; return Math.sin(p) / p; };
+  for (let i = 0; i < dn; i++) {
+    const c = (i + 0.5) / sc - 0.5, s0 = Math.floor(c - sup) + 1;
+    start[i] = s0;
+    let sum = 0;
+    for (let t = 0; t < taps; t++) { const x = (s0 + t - c) / fs; const v = Math.abs(x) < 3 ? sinc(x) * sinc(x / 3) : 0; wt[i * taps + t] = v; sum += v; }
+    for (let t = 0; t < taps; t++) wt[i * taps + t] /= sum || 1;
+  }
+  return { start, wt, taps };
+}
+function lanczosResize(c, nw, nh) {
+  const w = c.width, h = c.height;
+  nw = Math.max(1, Math.round(nw)); nh = Math.max(1, Math.round(nh));
+  if (nw * h * 4 > 160e6) { const n = mk(nw, nh), g = cx(n); g.imageSmoothingQuality = 'high'; g.drawImage(c, 0, 0, nw, nh); return n; }
+  const d = cx(c).getImageData(0, 0, w, h).data;
+  // horizontal: w → nw (premultiply sambil jalan)
+  const X = lzWeights(w, nw), tmp = new Float32Array(nw * h * 4);
+  for (let y = 0; y < h; y++) {
+    const ro = y * w;
+    for (let i = 0; i < nw; i++) {
+      let r = 0, g = 0, b = 0, a = 0;
+      const s0 = X.start[i], wo = i * X.taps;
+      for (let t = 0; t < X.taps; t++) {
+        const k = X.wt[wo + t];
+        if (!k) continue;
+        const j = (ro + clamp(s0 + t, 0, w - 1)) * 4, al = d[j + 3] / 255;
+        r += d[j] * al * k; g += d[j + 1] * al * k; b += d[j + 2] * al * k; a += d[j + 3] * k;
+      }
+      const o = (y * nw + i) * 4; tmp[o] = r; tmp[o + 1] = g; tmp[o + 2] = b; tmp[o + 3] = a;
+    }
+  }
+  // vertikal: h → nh, lalu un-premultiply
+  const Y = lzWeights(h, nh), out = new ImageData(nw, nh), od = out.data;
+  for (let i = 0; i < nh; i++) {
+    const s0 = Y.start[i], wo = i * Y.taps;
+    for (let x = 0; x < nw; x++) {
+      let r = 0, g = 0, b = 0, a = 0;
+      for (let t = 0; t < Y.taps; t++) {
+        const k = Y.wt[wo + t];
+        if (!k) continue;
+        const j = (clamp(s0 + t, 0, h - 1) * nw + x) * 4;
+        r += tmp[j] * k; g += tmp[j + 1] * k; b += tmp[j + 2] * k; a += tmp[j + 3] * k;
+      }
+      const o = (i * nw + x) * 4, A = clamp(a, 0, 255);
+      od[o + 3] = A;
+      if (A > 0) { const s = 255 / A; od[o] = r * s; od[o + 1] = g * s; od[o + 2] = b * s; }
+    }
+  }
+  const n = mk(nw, nh); cx(n).putImageData(out, 0, 0);
+  return n;
+}
+
 function silhouette(c, color) {
   const n = cloneCanvas(c), g = cx(n);
   g.globalCompositeOperation = 'source-in';

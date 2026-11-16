@@ -94,8 +94,7 @@ function exportDialog() {
       const comp = composite(), w = Math.max(1, Math.round(D.w * sc / 100)), h = Math.max(1, Math.round(D.h * sc / 100));
       const c = mk(w, h), g = cx(c);
       if (fmt.value === 'image/jpeg') { g.fillStyle = '#fff'; g.fillRect(0, 0, w, h); }
-      g.imageSmoothingQuality = 'high';
-      g.drawImage(comp, 0, 0, w, h);
+      g.drawImage(w === D.w && h === D.h ? comp : lanczosResize(comp, w, h), 0, 0);
       const blob = await toBlob(c, fmt.value, q / 100);
       download(blob, (S.fileName || 'gambar') + '-edit.' + { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp' }[fmt.value]);
     });
@@ -113,9 +112,9 @@ function newDocDialog() {
 }
 
 /* ---------- Transformasi dokumen (crop, putar, flip, resize) ---------- */
-function docApply(nw, nh, m, label) {
+function docApply(nw, nh, m, label, lanczos = false) {
   pushH(label);
-  const tc = c => { if (!c) return c; const n = mk(nw, nh), g = cx(n); g.imageSmoothingQuality = 'high'; g.setTransform(m); g.drawImage(c, 0, 0); return n; };
+  const tc = c => { if (!c) return c; if (lanczos) return lanczosResize(c, nw, nh); const n = mk(nw, nh), g = cx(n); g.imageSmoothingQuality = 'high'; g.setTransform(m); g.drawImage(c, 0, 0); return n; };
   transformPaths(m);
   const uniform = m.b === 0 && m.c === 0 && m.a > 0 && Math.abs(m.a - m.d) < 1e-9;
   let rasterized = false;
@@ -157,10 +156,11 @@ function resizeDialog() {
   const lock = el('input', { type: 'checkbox', checked: true }), ra = D.w / D.h;
   w.oninput = () => { if (lock.checked) h.value = Math.round(+w.value / ra); };
   h.oninput = () => { if (lock.checked) w.value = Math.round(+h.value * ra); };
-  modal('Ukuran gambar', el('div', {}, row('Lebar (px)', w), row('Tinggi (px)', h), el('label', { class: 'chk' }, lock, 'Kunci rasio')), () => {
+  const rs = el('select', {}, el('option', { value: 'lz' }, 'Lanczos (tajam, disarankan)'), el('option', { value: 'bl' }, 'Bilinear (halus)'));
+  modal('Ukuran gambar', el('div', {}, row('Lebar (px)', w), row('Tinggi (px)', h), el('label', { class: 'chk' }, lock, 'Kunci rasio'), row('Resampling', rs)), async () => {
     const W = clamp(+w.value | 0, 1, 12000), Hh = clamp(+h.value | 0, 1, 12000);
     if (W === D.w && Hh === D.h) return;
-    docApply(W, Hh, new DOMMatrix().scale(W / D.w, Hh / D.h), 'Ubah ukuran');
+    await busy('Mengubah ukuran…', async () => docApply(W, Hh, new DOMMatrix().scale(W / D.w, Hh / D.h), 'Ubah ukuran', rs.value === 'lz'));
   });
 }
 
@@ -320,11 +320,16 @@ async function filterCmd(kind) {
   if (l.type === 'adjust' || l.type === 'text') { toast('Pilih layer piksel atau Smart Object.'); return; }
   const F = FILTERS[kind];
   let amount = F.def || 0;
-  if (F.max && !await modal(F.name, slider(F.name, amount, F.min, F.max, 1, v => { amount = v; }, F.unit), null, 'Terapkan')) return;
-  if (l.type === 'smart') { pushH('Smart filter'); l.smart.filters.push({ kind, amount, on: true }); touch(l); refreshAll(); return; }
+  const extra = {};
+  if (F.max) {
+    const body = el('div', {}, slider(F.params ? 'Amount' : F.name, amount, F.min, F.max, 1, v => { amount = v; }, F.unit));
+    for (const [k, label, mn, mx, stp, def, unit] of F.params || []) { extra[k] = def; body.append(slider(label, def, mn, mx, stp, v => { extra[k] = v; }, unit)); }
+    if (!await modal(F.name, body, null, 'Terapkan')) return;
+  }
+  if (l.type === 'smart') { pushH('Smart filter'); l.smart.filters.push({ kind, amount, ...extra, on: true }); touch(l); refreshAll(); return; }
   await busy('Menerapkan ' + F.name + '…', async () => {
     pushH(F.name);
-    let f = applyFilter(l.canvas, { kind, amount });
+    let f = applyFilter(l.canvas, { kind, amount, ...extra });
     if (S.sel) {
       const keep = cloneCanvas(l.canvas), k = cx(keep);
       maskInto(f, S.sel);

@@ -8,7 +8,9 @@ HTML + CSS + JavaScript murni, tanpa build. Buka `index.html` langsung di browse
 |---|---|
 | Layer, urutan (drag), opacity, 16 blend mode | Panel Layer & Properti |
 | Layer mask (lukis hitam/putih, gradient, dari seleksi, invert, terapkan) | Klik thumbnail mask, menu Layer |
-| Adjustment layer: Curves, Levels, Hue/Saturation, Color Balance, Camera Raw | Menu Layer, tombol "◐ Adjustment" |
+| Adjustment layer: Curves, Levels, Hue/Saturation (per rentang warna), Color Balance, Camera Raw | Menu Layer, tombol "◐ Adjustment" |
+| Pipeline float + dither (tanpa banding), Exposure/WB di cahaya linear, histogram RGB live, peringatan clipping, Auto, pipet white balance | Panel Properti adjustment |
+| Unsharp Mask (amount, radius, threshold; luminans saja), resize & export Lanczos | Menu Filter, Gambar → Ukuran gambar |
 | Seleksi: Marquee, Lasso, Magic Wand, Quick Selection | Toolbar |
 | **Path (Pen)**: kurva Bézier yang bisa diedit, banyak path per dokumen, Path → Seleksi (baru/tambah/kurangi/irisan, feather), Seleksi → Path, isi & stroke path | Tool Pen (P), panel Path, menu Seleksi |
 | Select Subject (AI), Select and Mask (tepi rambut, feather, geser tepi) | Menu Seleksi |

@@ -156,34 +156,135 @@ function healCorrect(st) {
 
 /* ---------- Content-aware fill (inpainting berbasis patch) ----------
    Mengisi lubang dari tepi ke dalam; tiap piksel mencari patch paling mirip
-   (kandidat acak + propagasi dari tetangga agar tekstur menyambung). */
+   (kandidat acak + propagasi dari tetangga agar tekstur menyambung).
+   Multi-skala (kasar → halus): struktur besar diisi di resolusi kecil, lalu tiap level
+   ×2 memperhalus peta patch (PatchMatch) sampai resolusi tinggi, jadi tekstur tetap tajam. */
+const INP_BASE = 40000, INP_MAX = 1.2e6;
+function holeAt(dil, w, h) {
+  const hc = mk(w, h), hg = cx(hc);
+  hg.drawImage(dil, 0, 0, w, h);
+  const hd = hg.getImageData(0, 0, w, h).data, hole = new Uint8Array(w * h);
+  for (let i = 0; i < w * h; i++) hole[i] = hd[i * 4 + 3] > 10 ? 1 : 0;
+  return hole;
+}
 function inpaintCanvas(src, holeC) {
   const b = canvasBounds(holeC, 10);
   if (!b) return src;
   const pad = Math.round(Math.max(30, Math.max(b.w, b.h) * 0.9));
   const R = { x: Math.max(0, b.x - pad), y: Math.max(0, b.y - pad) };
   R.w = Math.min(D.w, b.x + b.w + pad) - R.x; R.h = Math.min(D.h, b.y + b.h + pad) - R.y;
-  const s = Math.min(1, Math.sqrt(250000 / (R.w * R.h)));
-  const w = Math.max(8, Math.round(R.w * s)), h = Math.max(8, Math.round(R.h * s));
   const dil = dilateCanvas(cropCanvas(holeC, R), 2);
 
-  const ic = mk(w, h), ig = cx(ic);
-  ig.drawImage(src, R.x, R.y, R.w, R.h, 0, 0, w, h);
-  const id = ig.getImageData(0, 0, w, h);
-  const hc = mk(w, h), hg = cx(hc);
-  hg.drawImage(dil, 0, 0, w, h);
-  const hd = hg.getImageData(0, 0, w, h).data, hole = new Uint8Array(w * h);
-  for (let i = 0; i < w * h; i++) hole[i] = hd[i * 4 + 3] > 10 ? 1 : 0;
-  inpaintCore(id.data, hole, w, h);
-  ig.putImageData(id, 0, 0);
+  const fs = Math.min(1, Math.sqrt(INP_MAX / (R.w * R.h)));
+  let w = Math.max(8, Math.round(R.w * fs)), h = Math.max(8, Math.round(R.h * fs));
+  const sizes = [[w, h]];
+  while (w * h > INP_BASE) { w = Math.max(8, Math.round(w / 2)); h = Math.max(8, Math.round(h / 2)); sizes.unshift([w, h]); }
+
+  let prev = null;
+  sizes.forEach(([w, h], li) => {
+    const ic = mk(w, h), ig = cx(ic);
+    ig.imageSmoothingQuality = 'high';
+    ig.drawImage(src, R.x, R.y, R.w, R.h, 0, 0, w, h);
+    const id = ig.getImageData(0, 0, w, h), d = id.data, hole = holeAt(dil, w, h);
+    let off;
+    if (!prev) off = inpaintCore(d, hole, w, h);
+    else {
+      const up = mk(w, h), ug = cx(up);
+      ug.imageSmoothingQuality = 'high'; ug.drawImage(prev.c, 0, 0, w, h);
+      const ud = ug.getImageData(0, 0, w, h).data;
+      for (let i = 0; i < w * h; i++) if (hole[i]) { const j = i * 4; d[j] = ud[j]; d[j + 1] = ud[j + 1]; d[j + 2] = ud[j + 2]; d[j + 3] = ud[j + 3]; }
+      off = inpaintRefine(d, hole, w, h, prev, li === sizes.length - 1 ? 1 : 2);
+    }
+    ig.putImageData(id, 0, 0);
+    prev = { c: ic, off, w, h };
+  });
 
   const fill = mk(R.w, R.h), fg = cx(fill);
   fg.imageSmoothingQuality = 'high';
-  fg.drawImage(ic, 0, 0, R.w, R.h);
+  fg.drawImage(prev.c, 0, 0, R.w, R.h);
   maskInto(fill, blurCanvas(dil, 1.5));
   const out = cloneCanvas(src);
   cx(out).drawImage(fill, R.x, R.y);
   return out;
+}
+
+/* Patch sumber valid = seluruh patch (2P+1)² berada di luar lubang */
+function srcChecker(hole, w, h, P) {
+  const W1 = w + 1, ii = new Int32Array(W1 * (h + 1));
+  for (let y = 0; y < h; y++) { let row = 0; for (let x = 0; x < w; x++) { row += hole[y * w + x]; ii[(y + 1) * W1 + x + 1] = ii[y * W1 + x + 1] + row; } }
+  return (x, y) => {
+    if (x < P || y < P || x >= w - P || y >= h - P) return false;
+    const x0 = x - P, y0 = y - P, x1 = x + P + 1, y1 = y + P + 1;
+    return ii[y1 * W1 + x1] - ii[y0 * W1 + x1] - ii[y1 * W1 + x0] + ii[y0 * W1 + x0] === 0;
+  };
+}
+
+/* Satu level halus: inisialisasi peta patch dari level kasar (koordinat ×skala), lalu
+   iterasi PatchMatch (propagasi tetangga + pencarian acak yang radiusnya menyusut). */
+function inpaintRefine(d, hole, w, h, prev, iters) {
+  const P = 3, n = w * h, okSrc = srcChecker(hole, w, h, P);
+  const off = new Int32Array(n).fill(-1), holes = [];
+  for (let i = 0; i < n; i++) if (hole[i]) holes.push(i);
+  if (!holes.length) return off;
+  const srcList = [];
+  for (let y = P; y < h - P; y += 2) for (let x = P; x < w - P; x += 2) if (okSrc(x, y)) srcList.push(y * w + x);
+  if (!srcList.length) return off;
+  const score = (px, py, c, lim) => {
+    const sx = c % w, sy = (c / w) | 0;
+    let s = 0;
+    for (let dy = -P; dy <= P; dy++) {
+      const yy = py + dy;
+      if (yy < 0 || yy >= h) continue;
+      for (let dx = -P; dx <= P; dx++) {
+        const xx = px + dx;
+        if (xx < 0 || xx >= w) continue;
+        const a = (yy * w + xx) * 4, b = ((sy + dy) * w + sx + dx) * 4;
+        const e0 = d[a] - d[b], e1 = d[a + 1] - d[b + 1], e2 = d[a + 2] - d[b + 2];
+        s += e0 * e0 + e1 * e1 + e2 * e2;
+      }
+      if (s >= lim) return s;
+    }
+    return s;
+  };
+  const kx = w / prev.w, ky = h / prev.h;
+  const best = new Float64Array(n);
+  for (const p of holes) {
+    const x = p % w, y = (p / w) | 0;
+    let c = -1;
+    if (prev.off) {
+      const qx = Math.min(prev.w - 1, Math.floor(x / kx)), qy = Math.min(prev.h - 1, Math.floor(y / ky)), o = prev.off[qy * prev.w + qx];
+      if (o >= 0) {
+        const sx = Math.round((o % prev.w) * kx + (x - qx * kx)), sy = Math.round(((o / prev.w) | 0) * ky + (y - qy * ky));
+        if (okSrc(sx, sy)) c = sy * w + sx;
+      }
+    }
+    if (c < 0) c = srcList[(Math.random() * srcList.length) | 0];
+    off[p] = c; best[p] = score(x, y, c, Infinity);
+  }
+  const R0 = Math.max(w, h) / 4;
+  for (let it = 0; it < iters; it++) {
+    const fwd = it % 2 === 0, st = fwd ? -1 : 1;
+    for (let k = 0; k < holes.length; k++) {
+      const p = holes[fwd ? k : holes.length - 1 - k], x = p % w, y = (p / w) | 0;
+      let bc = off[p], bs = best[p];
+      const tryC = (sx, sy) => {
+        if (!okSrc(sx, sy)) return;
+        const c = sy * w + sx;
+        if (c === bc) return;
+        const s = score(x, y, c, bs);
+        if (s < bs) { bs = s; bc = c; }
+      };
+      // propagasi: tetangga yang sudah diproses menyarankan pergeseran yang sama
+      const qx = x + st, qy = y + st;
+      if (qx >= 0 && qx < w && off[y * w + qx] >= 0) { const o = off[y * w + qx]; tryC(o % w - st, (o / w) | 0); }
+      if (qy >= 0 && qy < h && off[qy * w + x] >= 0) { const o = off[qy * w + x]; tryC(o % w, ((o / w) | 0) - st); }
+      for (let r = R0; r >= 1; r /= 2) tryC(((bc % w) + (Math.random() * 2 - 1) * r) | 0, (((bc / w) | 0) + (Math.random() * 2 - 1) * r) | 0);
+      off[p] = bc; best[p] = bs;
+      const a = p * 4, b2 = bc * 4;
+      d[a] = d[b2]; d[a + 1] = d[b2 + 1]; d[a + 2] = d[b2 + 2]; d[a + 3] = d[b2 + 3];
+    }
+  }
+  return off;
 }
 
 function inpaintCore(d, hole, w, h) {
@@ -199,7 +300,7 @@ function inpaintCore(d, hole, w, h) {
   };
   const srcList = [];
   for (let y = P; y < h - P; y++) for (let x = P; x < w - P; x++) if (okSrc(x, y)) srcList.push(y * w + x);
-  if (!srcList.length) return;
+  if (!srcList.length) return null;
 
   const off = new Int32Array(n).fill(-1);
   const DX = [-1, 1, 0, 0, -1, 1, -1, 1], DY = [0, 0, -1, 1, -1, -1, 1, 1];
@@ -262,6 +363,7 @@ function inpaintCore(d, hole, w, h) {
     }
     front = next;
   }
+  return off;
 }
 
 function contentAwareFill() {

@@ -190,27 +190,79 @@ function lumHist() {
   for (let i = 0; i < d.length; i += step) h[(0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]) | 0]++;
   return h;
 }
-function histCanvas() {
-  const h = lumHist(), c = el('canvas', { width: 256, height: 70, class: 'hist' }), g = c.getContext('2d');
-  g.fillStyle = '#17181b'; g.fillRect(0, 0, 256, 70);
-  if (h) { const mx = Math.max(...h) || 1; g.fillStyle = 'rgba(255,255,255,.5)'; for (let i = 0; i < 256; i++) { const v = h[i] / mx * 68; g.fillRect(i, 70 - v, 1, v); } }
-  return c;
+/* Histogram RGB + persentase clipping; ikut diperbarui setiap kali gambar dirender ulang. */
+function drawHist(c, info) {
+  const g = c.getContext('2d'), W = 256, Hh = 80;
+  g.globalCompositeOperation = 'source-over'; g.fillStyle = '#17181b'; g.fillRect(0, 0, W, Hh);
+  if (!S.comp || !D) return;
+  const d = compData().data, hs = [new Uint32Array(256), new Uint32Array(256), new Uint32Array(256)];
+  const step = Math.max(1, Math.floor(d.length / 4 / 200000)) * 4;
+  let n = 0, lo = 0, hi = 0;
+  for (let i = 0; i < d.length; i += step) {
+    if (d[i + 3] < 8) continue;
+    hs[0][d[i]]++; hs[1][d[i + 1]]++; hs[2][d[i + 2]]++; n++;
+    const mx = Math.max(d[i], d[i + 1], d[i + 2]);
+    if (mx >= 254) hi++; else if (mx <= 3 && Math.min(d[i], d[i + 1], d[i + 2]) <= 1) lo++;
+  }
+  // skala akar supaya puncak tunggal tidak meratakan sisanya
+  let mx = 1; for (const h of hs) for (let i = 1; i < 255; i++) mx = Math.max(mx, h[i]);
+  const sm = Math.sqrt(mx);
+  g.globalCompositeOperation = 'lighter';
+  ['rgba(255,70,70,.75)', 'rgba(70,220,100,.75)', 'rgba(80,140,255,.8)'].forEach((col, k) => {
+    g.fillStyle = col;
+    for (let i = 0; i < 256; i++) { const v = Math.min(Hh, Math.sqrt(hs[k][i]) / sm * (Hh - 2)); g.fillRect(i, Hh - v, 1, v); }
+  });
+  g.globalCompositeOperation = 'source-over';
+  const pl = n ? lo / n * 100 : 0, ph = n ? hi / n * 100 : 0;
+  g.fillStyle = pl > 0.5 ? '#60a5fa' : '#3a3d44'; g.fillRect(0, 0, 8, 8);
+  g.fillStyle = ph > 0.5 ? '#ff4a5e' : '#3a3d44'; g.fillRect(W - 8, 0, 8, 8);
+  if (info) info.textContent = `Shadow terpotong ${pl.toFixed(1)}% · Highlight terpotong ${ph.toFixed(1)}%`;
 }
-function specSliders(p, l, spec) {
-  const a = l.adj;
+let histT = 0;
+function updateHists() {
+  S.hists = S.hists.filter(h => h.c.isConnected);
+  clearTimeout(histT);
+  histT = setTimeout(() => S.hists.forEach(h => drawHist(h.c, h.info)), 60);
+}
+function histCanvas() {
+  const c = el('canvas', { width: 256, height: 80, class: 'hist', 'aria-label': 'Histogram RGB' });
+  const info = el('p', { class: 'muted small' });
+  (S.hists = S.hists || []).push({ c, info });
+  drawHist(c, info);
+  const clip = el('label', { class: 'chk' }, el('input', { type: 'checkbox', checked: !!S.clip, onchange: e => { S.clip = e.target.checked; requestView(); } }), 'Tampilkan clipping di kanvas');
+  return el('div', {}, c, info, clip);
+}
+function specSliders(p, l, spec, obj = l.adj, key = '') {
   for (const s of spec) {
     if (s.length === 1) { section(p, s[0]); continue; }
     const [k, label, min, max, step] = s;
-    p.append(slider(label, a[k], min, max, step, v => { pushH(label, 'adj' + k + l.id); a[k] = v; touch(l); }));
+    p.append(slider(label, obj[k], min, max, step, v => { pushH(label, 'adj' + key + k + l.id); obj[k] = v; touch(l); }));
   }
+}
+function hslUI(p, l) {
+  const a = l.adj;
+  a.bands = a.bands || {}; a.band = a.band || 'all';
+  const sel = el('select', { 'aria-label': 'Rentang warna', onchange: e => { a.band = e.target.value; renderProps(); } },
+    el('option', { value: 'all', selected: a.band === 'all' }, 'Semua warna'),
+    ...HSL_BANDS.map(([k, n]) => el('option', { value: k, selected: a.band === k }, n + (a.bands[k] && (a.bands[k].hue || a.bands[k].sat || a.bands[k].light) ? ' •' : ''))));
+  p.append(row('Rentang', sel));
+  if (a.band === 'all') specSliders(p, l, HSL_SPEC);
+  else specSliders(p, l, HSL_SPEC, a.bands[a.band] = a.bands[a.band] || { hue: 0, sat: 0, light: 0 }, a.band);
+  if (a.band !== 'all') p.append(el('p', { class: 'muted small' }, 'Hanya warna ' + HSL_BANDS.find(b => b[0] === a.band)[1].toLowerCase() + ' yang berubah; transisi ke warna tetangga dibuat halus.'));
 }
 function adjustUI(p, l) {
   const a = l.adj;
   section(p, ADJ[a.kind].name);
   if (a.kind === 'curves') curvesUI(p, l);
-  else if (a.kind === 'levels') { p.append(histCanvas()); specSliders(p, l, LEVELS_SPEC); }
-  else if (a.kind === 'hsl') specSliders(p, l, HSL_SPEC);
-  else if (a.kind === 'raw') specSliders(p, l, RAW_SPEC);
+  else if (a.kind === 'levels') {
+    p.append(histCanvas(), el('div', { class: 'btnrow' }, oBtn('Auto', () => autoAdjust(l))));
+    specSliders(p, l, LEVELS_SPEC);
+  }
+  else if (a.kind === 'hsl') hslUI(p, l);
+  else if (a.kind === 'raw') {
+    p.append(histCanvas(), el('div', { class: 'btnrow' }, oBtn('Auto', () => autoAdjust(l)), oBtn(S.pick ? 'Klik di kanvas…' : 'Pipet white balance', () => startWBPick(l))));
+    specSliders(p, l, RAW_SPEC);
+  }
   else if (a.kind === 'balance') {
     p.append(el('div', { class: 'seg' }, ...[['shadows', 'Shadows'], ['mid', 'Midtones'], ['high', 'Highlights']].map(([v, t]) =>
       el('button', { class: a.tone === v ? 'on' : '', onclick: () => { a.tone = v; renderProps(); } }, t))));
@@ -280,7 +332,9 @@ function smartUI(p, l) {
       el('div', { class: 'frow' },
         el('label', { class: 'chk' }, el('input', { type: 'checkbox', checked: f.on !== false, onchange: e => { pushH('Smart filter'); f.on = e.target.checked; touch(l); } }), F.name),
         el('button', { class: 'icon-btn small', title: 'Hapus filter', 'aria-label': 'Hapus filter', onclick: () => { pushH('Hapus filter'); s.filters.splice(i, 1); touch(l); renderProps(); } }, '✕')));
-    if (F.max) box.append(slider('Nilai', f.amount, F.min, F.max, 1, v => { pushH('Smart filter', 'sf' + i + l.id); f.amount = v; touch(l); }, F.unit));
+    if (F.max) box.append(slider(F.params ? 'Amount' : 'Nilai', f.amount, F.min, F.max, 1, v => { pushH('Smart filter', 'sf' + i + l.id); f.amount = v; touch(l); }, F.unit));
+    for (const [k, label, mn, mx, stp, def, unit] of F.params || [])
+      box.append(slider(label, f[k] ?? def, mn, mx, stp, v => { pushH('Smart filter', 'sf' + k + i + l.id); f[k] = v; touch(l); }, unit));
     p.append(box);
   });
   p.append(row('Tambah', el('select', { onchange: e => { if (!e.target.value) return; filterCmd(e.target.value); e.target.value = ''; } },

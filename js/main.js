@@ -11,6 +11,7 @@ function evPt(e) {
 view.addEventListener('pointerdown', e => {
   if (!D) return;
   e.preventDefault();
+  if (S.pick && e.button === 0) { pickWB(evPt(e)); return; }
   view.setPointerCapture(e.pointerId);
   dragTool = S.spaceDown || e.button === 1 ? TOOLS.hand : e.button === 0 ? TOOLS[S.tool] : null;
   if (dragTool && dragTool.down) dragTool.down(evPt(e), e);
@@ -92,6 +93,7 @@ addEventListener('keydown', e => {
   }
   if (e.key === 'Escape') {
     if (inField) { e.target.blur(); return; }
+    if (S.pick) return run(() => { endWBPick(); renderProps(); });
     if (T) return run(cancelTransform);
     if (S.tool === 'pen') return run(finishSub);
     if (S.tool === 'crop') return run(() => { TOOLS.crop.activate(); requestView(); });
@@ -100,6 +102,7 @@ addEventListener('keydown', e => {
   if (e.key === 'Delete' || e.key === 'Backspace') {
     if (S.tool === 'pen' && PS.sel && !e.shiftKey && !e.altKey) return run(deleteAnchor);
     if (e.shiftKey) return run(contentAwareFill);
+    if (!S.sel && !e.altKey) return run(deleteLayer);
     return run(e.altKey ? fillSel : clearSel);
   }
   if (S.tool === 'move' && e.key.startsWith('Arrow')) {
