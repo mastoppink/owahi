@@ -9,7 +9,7 @@ const UP_TARGETS = [
   ['enh', 'Perjelas · ukuran tetap (detail lebih tajam)'],
   ['deblur', 'Hilangkan blur · ukuran tetap (MAXIM, ~88 MB, lambat)'],
 ];
-const UP_MAX_SIDE = 8192, UP_MAX_PX = 40e6;
+const UP_MAX_SIDE = 8192, UP_MAX_PX = 40e6, UP_MAX_PX_MOBILE = 12e6; // HP: batas memori kanvas (terutama Safari iOS)
 let upCancel = false;
 
 function upTarget(t, w, h) {
@@ -17,8 +17,9 @@ function upTarget(t, w, h) {
   const long = Math.max(w, h);
   const goal = { '4k': 3840, '4kd': 4096, '2k': 2560 }[t];
   let f = goal ? goal / long : t === 'x2' ? 2 : 4;
-  f = Math.min(f, UP_MAX_SIDE / long, Math.sqrt(UP_MAX_PX / (w * h)));
-  return { f, w: Math.round(w * f), h: Math.round(h * f) };
+  const want = f, maxPx = upDev && upDev.tier === 'mobile' ? UP_MAX_PX_MOBILE : UP_MAX_PX;
+  f = Math.min(f, UP_MAX_SIDE / long, Math.sqrt(maxPx / (w * h)));
+  return { f, w: Math.round(w * f), h: Math.round(h * f), capped: f < want - 1e-6 && maxPx === UP_MAX_PX_MOBILE };
 }
 
 /* Perkecil bertahap (maks 2× per langkah) agar hasil tetap tajam. */
@@ -48,15 +49,15 @@ const UP_MODELS = {
   nanime: { name: 'Native GPU · Real-ESRGAN anime/ilustrasi', native: 'anime', scales: [4], hidden: true },
   nvid: { name: 'Native GPU · Real-ESR general 2×/3×/4× (ringan)', native: 'video', scales: [2, 3, 4], hidden: true },
   // Real-ESRGAN x4plus di browser (ONNX Runtime Web + WebGPU), dikonversi dari bobot resmi; tidak perlu server.js
-  rx4: { name: 'Real-ESRGAN x4plus · di browser (~34 MB, terbaik untuk foto)', onnx: 'models/realesrgan-x4plus-fp16.onnx', size: '~34 MB', scales: [4], ov: 16 },
+  rx4: { heavy: true, name: 'Real-ESRGAN x4plus · di browser (~34 MB, terbaik untuk foto)', onnx: 'models/realesrgan-x4plus-fp16.onnx', size: '~34 MB', scales: [4], ov: 16 },
   // versi kompak resmi (SRVGGNetCompact, ~13× lebih ringan): cocok untuk laptop tanpa GPU kuat
   rxl: { name: 'Real-ESR general · di browser (~2,4 MB, ringan & cepat)', onnx: 'models/realesr-general-x4v3-fp16.onnx', size: '~2,4 MB', scales: [4], ov: 12 },
-  thick: { name: 'Kualitas terbaik · ESRGAN thick (~28 MB)', pkg: '@upscalerjs/esrgan-thick@1.0.0', scales: [2, 3, 4, 8], rrdn: true, path: s => `models/x${s}/model.json` },
+  thick: { heavy: true, name: 'Kualitas terbaik · ESRGAN thick (~28 MB)', pkg: '@upscalerjs/esrgan-thick@1.0.0', scales: [2, 3, 4, 8], rrdn: true, path: s => `models/x${s}/model.json` },
   gans: { name: 'Tekstur tajam · ESRGAN GAN (~4 MB)', pkg: '@upscalerjs/esrgan-legacy@1.0.0', scales: [4], rrdn: true, path: () => 'models/gans/model.json' },
   medium: { name: 'Sedang · ESRGAN medium (~5 MB)', pkg: '@upscalerjs/esrgan-medium@1.0.0', scales: [2, 3, 4, 8], rrdn: false, path: s => `models/x${s}/model.json` },
   slim: { name: 'Cepat · ESRGAN slim (~1 MB)', pkg: '@upscalerjs/esrgan-slim@1.0.0', scales: [2, 3, 4, 8], rrdn: false, path: s => `models/x${s}/model.json` },
   // MAXIM deblur (dataset GoPro): graph model 1×, input/output 0..1, sisi harus kelipatan 64
-  maxim: { name: 'Deblur · MAXIM (~88 MB)', pkg: '@upscalerjs/maxim-deblurring@0.1.0', scales: [1], rrdn: true, graph: true, div: 64, ov: 32, hidden: true, path: () => 'models/model.json' },
+  maxim: { heavy: true, name: 'Deblur · MAXIM (~88 MB)', pkg: '@upscalerjs/maxim-deblurring@0.1.0', scales: [1], rrdn: true, graph: true, div: 64, ov: 32, hidden: true, path: () => 'models/model.json' },
 };
 const upCache = {};
 function loadScript(src) {
@@ -236,13 +237,18 @@ async function deviceProfile() {
       gpuName = [info.vendor, info.architecture || info.device].filter(Boolean).join(' ');
     }
   } catch { /* tanpa WebGPU */ }
-  const lowMem = mem && mem < 8, weakCpu = cores && cores < 4;
+  const lowMem = mem && mem < 8, weakCpu = cores && cores < 4, ua = navigator.userAgent || '';
+  // HP/tablet: memori kanvas & tab jauh lebih terbatas walau GPU-nya mendukung WebGPU
+  const mobile = !!(navigator.userAgentData && navigator.userAgentData.mobile) || /Android|iPhone|iPad|iPod|Mobile/i.test(ua)
+    || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1) // iPadOS menyamar sebagai Mac
+    || (matchMedia('(pointer: coarse)').matches && Math.min(screen.width, screen.height) < 820);
   // tinggi: WebGPU + RAM cukup + buffer GPU besar; sedang: WebGPU tapi terbatas; rendah: tanpa WebGPU (CPU/WebGL)
-  const tier = !webgpu ? 'low' : (lowMem || maxBuf < 1 << 30 || weakCpu) ? 'mid' : 'high';
-  return (upDev = { tier, webgpu, mem, cores, maxBuf, gpuName });
+  const tier = mobile ? 'mobile' : !webgpu ? 'low' : (lowMem || maxBuf < 1 << 30 || weakCpu) ? 'mid' : 'high';
+  return (upDev = { tier, mobile, webgpu, mem, cores, maxBuf, gpuName });
 }
 function recommend(dev, nat) {
   if (nat.available) return { model: 'nx4', tile: 192, why: 'Native GPU tersedia (server lokal)' };
+  if (dev.tier === 'mobile') return { model: 'rxl', tile: dev.webgpu ? 96 : 64, why: 'HP/tablet, hemat memori' };
   if (dev.tier === 'high') return { model: 'rx4', tile: 192, why: 'GPU WebGPU kuat' };
   if (dev.tier === 'mid') return { model: 'rxl', tile: 128, why: 'GPU WebGPU dengan memori terbatas' };
   return { model: 'rxl', tile: 96, why: 'tanpa WebGPU, diproses CPU' };
@@ -339,10 +345,16 @@ async function upscaleDialog() {
   const lModel = el('select', {}, ...Object.entries(UP_MODELS).filter(([, m]) => (m.native ? nat.available : !m.hidden)).map(([k, m]) => el('option', { value: k, selected: k === rec.model }, m.name + (k === rec.model ? ' ★ disarankan' : ''))));
   const lTta = el('select', {}, el('option', { value: 1, selected: true }, 'Normal (tercepat)'), el('option', { value: 2 }, 'Tinggi · rata-rata 2 orientasi (2× lebih lama)'), el('option', { value: 4 }, 'Maksimal · 4 orientasi (4× lebih lama)'));
   const lTile = el('select', {}, ...[[64, '64 px (GPU lemah / HP)'], [96, '96 px'], [128, '128 px'], [192, '192 px'], [256, '256 px (GPU kuat, tercepat)']].map(([v, l]) => el('option', { value: v, selected: v === rec.tile }, l + (v === rec.tile ? ' ★' : ''))));
-  const devInfo = el('p', { class: 'muted small' }, `Perangkat: ${dev.webgpu ? 'WebGPU' + (dev.gpuName ? ' (' + dev.gpuName + ')' : '') : 'tanpa WebGPU'}${dev.mem ? ' · RAM ' + (dev.mem >= 8 ? '≥8' : dev.mem) + ' GB' : ''}${dev.cores ? ' · ' + dev.cores + ' inti CPU' : ''}. ★ = pilihan otomatis: ${rec.why}.${dev.tier === 'low' ? ' Model berat (x4plus, thick, MAXIM) akan sangat lambat di perangkat ini.' : ''}`);
+  const devInfo = el('p', { class: 'muted small' }, `Perangkat: ${dev.webgpu ? 'WebGPU' + (dev.gpuName ? ' (' + dev.gpuName + ')' : '') : 'tanpa WebGPU'}${dev.mem ? ' · RAM ' + (dev.mem >= 8 ? '≥8' : dev.mem) + ' GB' : ''}${dev.cores ? ' · ' + dev.cores + ' inti CPU' : ''}. ★ = pilihan otomatis: ${rec.why}.${dev.tier === 'low' ? ' Model berat (x4plus, thick, MAXIM) akan sangat lambat di perangkat ini.' : ''}${dev.tier === 'mobile' ? ` Mode HP: hasil dibatasi ±${UP_MAX_PX_MOBILE / 1e6} MP dan dokumen disimpan otomatis sebelum proses.` : ''}`);
   let gan = 0, sharpen = 0, strength = 100, detail = 80;
   const info = el('p', { class: 'muted small' });
   const upd = () => {
+    upd0();
+    const t = upTarget(tSel.value, D.w, D.h), m = UP_MODELS[t.deblur ? 'maxim' : lModel.value];
+    if (t.capped) info.textContent += ` Dibatasi ke ${t.w}×${t.h} (±${UP_MAX_PX_MOBILE / 1e6} MP) karena memori HP terbatas.`;
+    if (dev.mobile && m.heavy) info.textContent += ' ⚠ Model ini berat untuk HP: berisiko membuat tab tertutup/ter-reload. Disarankan Real-ESR general.';
+  };
+  const upd0 = () => {
     const t = upTarget(tSel.value, D.w, D.h);
     modelRow.hidden = t.deblur;
     const isNat = !t.deblur && !!UP_MODELS[lModel.value].native;
@@ -387,6 +399,8 @@ async function runUpscale(o) {
   await busy('Menyiapkan…', async () => {
     b.append(cancel);
     try {
+      // HP: simpan dulu, karena tab bisa ditutup sistem saat memori penuh
+      if (upDev && upDev.mobile && typeof autosave === 'function') { msg.textContent = 'Menyimpan dokumen dulu…'; try { await autosave(); } catch { /* tetap lanjut */ } }
       const L = o.layer && D.layers.includes(o.layer) ? o.layer : null;
       const src = L ? L.canvas : composite(), alpha = hasAlpha(src);
       if (L) t.w = src.width, t.h = src.height;
@@ -438,6 +452,7 @@ async function runUpscale(o) {
       toast(`Selesai: ${t.w}×${t.h} px dalam ${Math.round((performance.now() - t0) / 1000)} detik.`);
     } finally {
       cancel.remove();
+      upCache.tc = null; // lepas kanvas sementara (bisa puluhan MB)
     }
   });
 }

@@ -80,6 +80,9 @@ Semua di menu **Gambar → AI Upscale** (Ctrl+Alt+U). Gambar dipotong jadi tile 
 | WebGPU, RAM ≥ 8 GB, memori GPU besar | Real-ESRGAN x4plus di browser | 192 |
 | WebGPU tapi RAM/memori GPU terbatas | Real-ESR general (ringan) | 128 |
 | Tanpa WebGPU (CPU) | Real-ESR general (ringan) | 96 |
+| HP / tablet | Real-ESR general (ringan) | 96 (64 tanpa WebGPU) |
+
+**Di HP/tablet** (Chrome Android 121+, Safari iOS 26+ untuk WebGPU; versi lebih lama memakai CPU): hasil dibatasi ±12 MP (4K UHD masih masuk), dokumen disimpan otomatis sebelum proses, dan model berat (x4plus, thick, MAXIM) diberi peringatan karena bisa membuat tab tertutup.
 
 Semua pilihan tetap bisa diubah manual. Kalau GPU kehabisan memori di tengah proses, tile otomatis diperkecil setengah lalu pass itu diulang. Progres menampilkan perkiraan sisa waktu, dan halaman tetap responsif (tombol Batal bisa dipakai) di perangkat lambat.
 
