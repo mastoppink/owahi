@@ -48,7 +48,9 @@ const UP_MODELS = {
   nanime: { name: 'Native GPU · Real-ESRGAN anime/ilustrasi', native: 'anime', scales: [4], hidden: true },
   nvid: { name: 'Native GPU · Real-ESR general 2×/3×/4× (ringan)', native: 'video', scales: [2, 3, 4], hidden: true },
   // Real-ESRGAN x4plus di browser (ONNX Runtime Web + WebGPU), dikonversi dari bobot resmi; tidak perlu server.js
-  rx4: { name: 'Real-ESRGAN x4plus · di browser (~34 MB, terbaik untuk foto)', onnx: 'models/realesrgan-x4plus-fp16.onnx', scales: [4], ov: 16 },
+  rx4: { name: 'Real-ESRGAN x4plus · di browser (~34 MB, terbaik untuk foto)', onnx: 'models/realesrgan-x4plus-fp16.onnx', size: '~34 MB', scales: [4], ov: 16 },
+  // versi kompak resmi (SRVGGNetCompact, ~13× lebih ringan): cocok untuk laptop tanpa GPU kuat
+  rxl: { name: 'Real-ESR general · di browser (~2,4 MB, ringan & cepat)', onnx: 'models/realesr-general-x4v3-fp16.onnx', size: '~2,4 MB', scales: [4], ov: 12 },
   thick: { name: 'Kualitas terbaik · ESRGAN thick (~28 MB)', pkg: '@upscalerjs/esrgan-thick@1.0.0', scales: [2, 3, 4, 8], rrdn: true, path: s => `models/x${s}/model.json` },
   gans: { name: 'Tekstur tajam · ESRGAN GAN (~4 MB)', pkg: '@upscalerjs/esrgan-legacy@1.0.0', scales: [4], rrdn: true, path: () => 'models/gans/model.json' },
   medium: { name: 'Sedang · ESRGAN medium (~5 MB)', pkg: '@upscalerjs/esrgan-medium@1.0.0', scales: [2, 3, 4, 8], rrdn: false, path: s => `models/x${s}/model.json` },
@@ -170,6 +172,7 @@ async function esrganPass(src, model, o, onTile) {
     const dx = Math.round(x0 * outF), dy = Math.round(y0 * outF), dw = Math.round(x1 * outF) - dx, dh = Math.round(y1 * outF) - dy;
     og.drawImage(upCache.tc, (x0 - px0) * scale, (y0 - py0) * scale, (x1 - x0) * scale, (y1 - y0) * scale, dx, dy, dw, dh);
     onTile(++i, n);
+    await upYield();
   }
   return out;
 }
@@ -201,13 +204,57 @@ async function nativePass(src, model, step, tta) {
   } finally { clearInterval(iv); }
 }
 
+/* Beri jeda ke browser ±tiap 100 ms (progres & tombol Batal tetap hidup di perangkat lambat). */
+let upLastYield = 0;
+async function upYield() {
+  const now = performance.now();
+  if (now - upLastYield < 100) return;
+  await new Promise(r => setTimeout(r, 0));
+  upLastYield = performance.now();
+}
+/* Progres + perkiraan sisa waktu (setelah beberapa tile). */
+function upProgress(t0, i, n) {
+  const pct = Math.round(i / n * 100);
+  if (i < 3 || i >= n) return `${pct}%`;
+  const left = (performance.now() - t0) / i * (n - i) / 1000;
+  const eta = left < 60 ? `${Math.ceil(left / 5) * 5} dtk` : `${Math.round(left / 60)} mnt`;
+  return `${pct}% · sisa ±${eta}${left > 600 ? ' · terlalu lama? batalkan & pilih model ringan / target lebih kecil' : ''}`;
+}
+const isOom = e => !upCancel && /memory|OOM|allocat|context.*lost|buffer|out of/i.test(String(e && (e.message || e)));
+
+/* ================= Profil perangkat → model & tile yang paling cocok ================= */
+let upDev = null;
+async function deviceProfile() {
+  if (upDev) return upDev;
+  const mem = navigator.deviceMemory || 0, cores = navigator.hardwareConcurrency || 0;
+  let webgpu = false, maxBuf = 0, gpuName = '';
+  try {
+    const ad = navigator.gpu && await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
+    const info = ad && (ad.info || {});
+    if (ad && !ad.isFallbackAdapter && !info.isFallbackAdapter) {
+      webgpu = true; maxBuf = ad.limits.maxBufferSize || 0;
+      gpuName = [info.vendor, info.architecture || info.device].filter(Boolean).join(' ');
+    }
+  } catch { /* tanpa WebGPU */ }
+  const lowMem = mem && mem < 8, weakCpu = cores && cores < 4;
+  // tinggi: WebGPU + RAM cukup + buffer GPU besar; sedang: WebGPU tapi terbatas; rendah: tanpa WebGPU (CPU/WebGL)
+  const tier = !webgpu ? 'low' : (lowMem || maxBuf < 1 << 30 || weakCpu) ? 'mid' : 'high';
+  return (upDev = { tier, webgpu, mem, cores, maxBuf, gpuName });
+}
+function recommend(dev, nat) {
+  if (nat.available) return { model: 'nx4', tile: 192, why: 'Native GPU tersedia (server lokal)' };
+  if (dev.tier === 'high') return { model: 'rx4', tile: 192, why: 'GPU WebGPU kuat' };
+  if (dev.tier === 'mid') return { model: 'rxl', tile: 128, why: 'GPU WebGPU dengan memori terbatas' };
+  return { model: 'rxl', tile: 96, why: 'tanpa WebGPU, diproses CPU' };
+}
+
 /* ================= ONNX Runtime Web (Real-ESRGAN x4plus) ================= */
 const ORT_VER = '1.20.1';
 async function loadOrtModel(m, msg) {
   if (upCache[m.onnx]) return upCache[m.onnx];
   if (!window.ort) await loadScript(`https://cdn.jsdelivr.net/npm/onnxruntime-web@${ORT_VER}/dist/ort.webgpu.min.js`);
   ort.env.wasm.wasmPaths = `https://cdn.jsdelivr.net/npm/onnxruntime-web@${ORT_VER}/dist/`;
-  msg.textContent = 'Mengunduh model Real-ESRGAN (~34 MB, sekali saja)…';
+  msg.textContent = `Mengunduh model ${m.name.split(' · ')[0]} (${m.size}, sekali saja)…`;
   const buf = await (await fetch(m.onnx)).arrayBuffer();
   let sess = null, ep = 'webgpu';
   if (navigator.gpu) { try { sess = await ort.InferenceSession.create(buf, { executionProviders: ['webgpu'] }); } catch { sess = null; } }
@@ -238,6 +285,7 @@ async function onnxPass(src, mdl, o, onTile) {
     const dx = Math.round(x0 * outF), dy = Math.round(y0 * outF), dw = Math.round(x1 * outF) - dx, dh = Math.round(y1 * outF) - dy;
     og.drawImage(tc, (x0 - px0) * scale, (y0 - py0) * scale, (x1 - x0) * scale, (y1 - y0) * scale, dx, dy, dw, dh);
     onTile(++i, n);
+    await upYield();
   }
   return out;
 }
@@ -246,40 +294,52 @@ async function esrganRun(src, kind, t, opts, label, msg) {
   const m = UP_MODELS[kind], steps = upPlan(t.f, kind, t.enh);
   let cur = src;
   for (let k = 0; k < steps.length; k++) {
-    if (m.native) {
-      msg.textContent = `${label}pass ${k + 1}/${steps.length} · Real-ESRGAN ${steps[k].s}× di GPU native…`;
-      cur = await nativePass(cur, m.native, steps[k], opts.tta);
-      continue;
+    for (;;) {
+      try { cur = await esrganStep(cur, kind, m, steps, k, opts, label, msg); break; }
+      catch (e) {
+        // memori GPU/RAM kurang: ulangi pass ini dengan tile setengahnya
+        if (m.native || !isOom(e) || opts.tile <= 48) throw e;
+        opts.tile = Math.max(48, Math.floor(opts.tile / 2));
+        msg.textContent = `Memori kurang, mengulang dengan tile ${opts.tile} px…`;
+        await new Promise(r => setTimeout(r, 300));
+      }
     }
-    if (m.onnx) {
-      const mdl = await loadOrtModel(m, msg);
-      cur = await onnxPass(cur, mdl, { ...opts, step: steps[k], overlap: m.ov }, (i, n) => {
-        msg.textContent = `${label}pass ${k + 1}/${steps.length} · tile ${i}/${n} · ${Math.round(i / n * 100)}% · ${mdl.ep === 'webgpu' ? 'GPU WebGPU' : 'CPU (lambat)'}`;
-      });
-      continue;
-    }
-    msg.textContent = `Memuat model ${m.name.split(' · ')[1] || kind} ${steps[k].s}×… (pertama kali agak lama)`;
-    const model = await loadUpModel(kind, steps[k].s);
-    cur = await esrganPass(cur, model, { ...opts, step: steps[k], rrdn: m.rrdn, div: m.div, overlap: m.ov ?? opts.overlap }, (i, n) => {
-      msg.textContent = `${label}pass ${k + 1}/${steps.length} · tile ${i}/${n} · ${Math.round(i / n * 100)}% · ${upCache.backend === 'cpu' ? 'CPU (lambat)' : 'GPU ' + upCache.backend}${opts.tta > 1 ? ' · TTA ' + opts.tta + '×' : ''}`;
-    });
   }
   return resizeSharp(cur, t.w, t.h);
+}
+async function esrganStep(cur, kind, m, steps, k, opts, label, msg) {
+  if (m.native) {
+    msg.textContent = `${label}pass ${k + 1}/${steps.length} · Real-ESRGAN ${steps[k].s}× di GPU native…`;
+    return nativePass(cur, m.native, steps[k], opts.tta);
+  }
+  if (m.onnx) {
+    const mdl = await loadOrtModel(m, msg), t1 = performance.now();
+    return onnxPass(cur, mdl, { ...opts, step: steps[k], overlap: m.ov }, (i, n) => {
+      msg.textContent = `${label}pass ${k + 1}/${steps.length} · tile ${i}/${n} · ${upProgress(t1, i, n)} · ${mdl.ep === 'webgpu' ? 'GPU WebGPU' : 'CPU (lambat)'}`;
+    });
+  }
+  msg.textContent = `Memuat model ${m.name.split(' · ')[1] || kind} ${steps[k].s}×… (pertama kali agak lama)`;
+  const model = await loadUpModel(kind, steps[k].s), t1 = performance.now();
+  return esrganPass(cur, model, { ...opts, step: steps[k], rrdn: m.rrdn, div: m.div, overlap: m.ov ?? opts.overlap }, (i, n) => {
+    msg.textContent = `${label}pass ${k + 1}/${steps.length} · tile ${i}/${n} · ${upProgress(t1, i, n)} · ${upCache.backend === 'cpu' ? 'CPU (lambat)' : 'GPU ' + upCache.backend}${opts.tta > 1 ? ' · TTA ' + opts.tta + '×' : ''}`;
+  });
 }
 
 /* ================= Dialog & alur utama ================= */
 async function upscaleDialog() {
   if (!D) return;
-  const nat = await nativeCheck();
+  const [nat, dev] = await Promise.all([nativeCheck(), deviceProfile()]);
+  const rec = recommend(dev, nat);
   const tSel = el('select', {}, ...UP_TARGETS.map(([v, t]) => el('option', { value: v }, t)));
   const keepCb = el('input', { type: 'checkbox' });
   // Perjelas/Deblur bisa diterapkan ke layer piksel aktif saja (ukuran tetap, layer lain tak tersentuh)
   const al = AL(), canLayer = !!(al && al.type === 'pixel' && al.canvas);
   const scopeSel = el('select', {}, el('option', { value: 'all' }, 'Gambar gabungan (semua layer dilebur)'),
     el('option', { value: 'layer', disabled: !canLayer, selected: canLayer }, canLayer ? `Layer aktif saja · ${al.name}` : 'Layer aktif saja (pilih layer piksel dulu)'));
-  const lModel = el('select', {}, ...Object.entries(UP_MODELS).filter(([, m]) => (m.native ? nat.available : !m.hidden)).map(([k, m]) => el('option', { value: k }, m.name)));
+  const lModel = el('select', {}, ...Object.entries(UP_MODELS).filter(([, m]) => (m.native ? nat.available : !m.hidden)).map(([k, m]) => el('option', { value: k, selected: k === rec.model }, m.name + (k === rec.model ? ' ★ disarankan' : ''))));
   const lTta = el('select', {}, el('option', { value: 1, selected: true }, 'Normal (tercepat)'), el('option', { value: 2 }, 'Tinggi · rata-rata 2 orientasi (2× lebih lama)'), el('option', { value: 4 }, 'Maksimal · 4 orientasi (4× lebih lama)'));
-  const lTile = el('select', {}, el('option', { value: 64 }, '64 px (GPU lemah / HP)'), el('option', { value: 96 }, '96 px'), el('option', { value: 128 }, '128 px'), el('option', { value: 192, selected: true }, '192 px (disarankan)'), el('option', { value: 256 }, '256 px (GPU kuat, tercepat)'));
+  const lTile = el('select', {}, ...[[64, '64 px (GPU lemah / HP)'], [96, '96 px'], [128, '128 px'], [192, '192 px'], [256, '256 px (GPU kuat, tercepat)']].map(([v, l]) => el('option', { value: v, selected: v === rec.tile }, l + (v === rec.tile ? ' ★' : ''))));
+  const devInfo = el('p', { class: 'muted small' }, `Perangkat: ${dev.webgpu ? 'WebGPU' + (dev.gpuName ? ' (' + dev.gpuName + ')' : '') : 'tanpa WebGPU'}${dev.mem ? ' · RAM ' + (dev.mem >= 8 ? '≥8' : dev.mem) + ' GB' : ''}${dev.cores ? ' · ' + dev.cores + ' inti CPU' : ''}. ★ = pilihan otomatis: ${rec.why}.${dev.tier === 'low' ? ' Model berat (x4plus, thick, MAXIM) akan sangat lambat di perangkat ini.' : ''}`);
   let gan = 0, sharpen = 0, strength = 100, detail = 80;
   const info = el('p', { class: 'muted small' });
   const upd = () => {
@@ -309,7 +369,7 @@ async function upscaleDialog() {
   upd();
   const body = el('div', {}, row('Target', tSel), scopeRow, modelRow, detRow, strRow, ganRow, row('Kualitas', lTta), tileRow,
     slider('Tajamkan akhir', sharpen, 0, 100, 1, v => { sharpen = v; }, '%'),
-    el('label', { class: 'chk' }, keepCb, 'Simpan foto asli sebagai layer pembanding (tersembunyi)'), info,
+    el('label', { class: 'chk' }, keepCb, 'Simpan foto asli sebagai layer pembanding (tersembunyi)'), info, devInfo,
     el('p', { class: 'muted small' }, 'Campur tekstur GAN: model GAN ikut dijalankan lalu hasilnya dipadukan, untuk tekstur lebih tajam (waktu ~2×). Semua layer digabung lalu diperbesar. Bisa di-undo.'));
   modal('AI Upscale', body, () => {
     const t = upTarget(tSel.value, D.w, D.h);
