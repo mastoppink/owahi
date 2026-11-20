@@ -66,5 +66,9 @@
 <script src="js/actions.js"></script>
 <script src="js/autosave.js"></script>
 <script src="js/main.js"></script>
+<script>
+  // versi terbaru selalu dimuat (lihat sw.js); tidak aktif saat dibuka sebagai file://
+  if ('serviceWorker' in navigator && /^https?:$/.test(location.protocol)) navigator.serviceWorker.register('sw.js').catch(() => {});
+</script>
 </body>
 </html>

@@ -67,7 +67,7 @@ http.createServer((req, res) => {
     if (!file.startsWith(ROOT) || /(^|[\\/])\.(env|git)/.test(path.relative(ROOT, file)) || path.basename(file) === 'server.js' || /^tools([\\/]|$)/.test(path.relative(ROOT, file))) return send(res, 404, 'Not found', 'text/plain');
     if (fs.existsSync(file) && fs.statSync(file).isDirectory()) file = path.join(file, 'index.html');
     if (!fs.existsSync(file)) return send(res, 404, 'Not found', 'text/plain');
-    res.writeHead(200, { 'Content-Type': TYPES[path.extname(file)] || 'application/octet-stream' });
+    res.writeHead(200, { 'Content-Type': TYPES[path.extname(file)] || 'application/octet-stream', 'Cache-Control': 'no-cache' });
     fs.createReadStream(file).pipe(res);
   } catch (e) {
     send(res, 500, 'Server error: ' + e.message, 'text/plain');
