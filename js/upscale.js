@@ -47,6 +47,8 @@ const UP_MODELS = {
   nx4: { name: 'Native GPU · Real-ESRGAN x4plus (tercepat, foto)', native: 'x4plus', scales: [4], hidden: true },
   nanime: { name: 'Native GPU · Real-ESRGAN anime/ilustrasi', native: 'anime', scales: [4], hidden: true },
   nvid: { name: 'Native GPU · Real-ESR general 2×/3×/4× (ringan)', native: 'video', scales: [2, 3, 4], hidden: true },
+  // Real-ESRGAN x4plus di browser (ONNX Runtime Web + WebGPU), dikonversi dari bobot resmi; tidak perlu server.js
+  rx4: { name: 'Real-ESRGAN x4plus · di browser (~34 MB, terbaik untuk foto)', onnx: 'models/realesrgan-x4plus-fp16.onnx', scales: [4], ov: 16 },
   thick: { name: 'Kualitas terbaik · ESRGAN thick (~28 MB)', pkg: '@upscalerjs/esrgan-thick@1.0.0', scales: [2, 3, 4, 8], rrdn: true, path: s => `models/x${s}/model.json` },
   gans: { name: 'Tekstur tajam · ESRGAN GAN (~4 MB)', pkg: '@upscalerjs/esrgan-legacy@1.0.0', scales: [4], rrdn: true, path: () => 'models/gans/model.json' },
   medium: { name: 'Sedang · ESRGAN medium (~5 MB)', pkg: '@upscalerjs/esrgan-medium@1.0.0', scales: [2, 3, 4, 8], rrdn: false, path: s => `models/x${s}/model.json` },
@@ -199,6 +201,47 @@ async function nativePass(src, model, step, tta) {
   } finally { clearInterval(iv); }
 }
 
+/* ================= ONNX Runtime Web (Real-ESRGAN x4plus) ================= */
+const ORT_VER = '1.20.1';
+async function loadOrtModel(m, msg) {
+  if (upCache[m.onnx]) return upCache[m.onnx];
+  if (!window.ort) await loadScript(`https://cdn.jsdelivr.net/npm/onnxruntime-web@${ORT_VER}/dist/ort.webgpu.min.js`);
+  ort.env.wasm.wasmPaths = `https://cdn.jsdelivr.net/npm/onnxruntime-web@${ORT_VER}/dist/`;
+  msg.textContent = 'Mengunduh model Real-ESRGAN (~34 MB, sekali saja)…';
+  const buf = await (await fetch(m.onnx)).arrayBuffer();
+  let sess = null, ep = 'webgpu';
+  if (navigator.gpu) { try { sess = await ort.InferenceSession.create(buf, { executionProviders: ['webgpu'] }); } catch { sess = null; } }
+  if (!sess) { ep = 'wasm'; sess = await ort.InferenceSession.create(buf, { executionProviders: ['wasm'] }); }
+  return (upCache[m.onnx] = { sess, ep });
+}
+/* Sama seperti esrganPass (tile berukuran tetap + overlap, langsung digambar di skala outF), tapi lewat ONNX (NCHW, 0..1). */
+async function onnxPass(src, mdl, o, onTile) {
+  const { s: scale, out: outF } = o.step, tile = o.tile, ov = o.overlap, { sess } = mdl;
+  const w = src.width, h = src.height, W = Math.round(w * outF), H = Math.round(h * outF);
+  const out = mk(W, H), og = cx(out), sd = cx(src);
+  og.imageSmoothingEnabled = true; og.imageSmoothingQuality = 'high';
+  const cols = Math.ceil(w / tile), rows = Math.ceil(h / tile), n = cols * rows;
+  const PW = Math.min(w, tile + 2 * ov), PH = Math.min(h, tile + 2 * ov), N = PW * PH;
+  const inp = new Float32Array(3 * N), tw = PW * scale, th = PH * scale, tc = mk(tw, th), tg = cx(tc), id = new ImageData(tw, th), od = id.data;
+  let i = 0;
+  for (let ty = 0; ty < rows; ty++) for (let tx = 0; tx < cols; tx++) {
+    if (upCancel) throw new Error('Dibatalkan');
+    const x0 = tx * tile, y0 = ty * tile, x1 = Math.min(w, x0 + tile), y1 = Math.min(h, y0 + tile);
+    const px0 = Math.max(0, Math.min(x0 - ov, w - PW)), py0 = Math.max(0, Math.min(y0 - ov, h - PH));
+    const d = sd.getImageData(px0, py0, PW, PH).data;
+    for (let k = 0, j = 0; j < N; k += 4, j++) { inp[j] = d[k] / 255; inp[N + j] = d[k + 1] / 255; inp[2 * N + j] = d[k + 2] / 255; }
+    const res = await sess.run({ [sess.inputNames[0]]: new ort.Tensor('float32', inp, [1, 3, PH, PW]) });
+    const ot = res[sess.outputNames[0]], y = ot.data, M = tw * th;
+    for (let j = 0, k = 0; j < M; j++, k += 4) { od[k] = y[j] * 255; od[k + 1] = y[M + j] * 255; od[k + 2] = y[2 * M + j] * 255; od[k + 3] = 255; }
+    ot.dispose?.();
+    tg.putImageData(id, 0, 0);
+    const dx = Math.round(x0 * outF), dy = Math.round(y0 * outF), dw = Math.round(x1 * outF) - dx, dh = Math.round(y1 * outF) - dy;
+    og.drawImage(tc, (x0 - px0) * scale, (y0 - py0) * scale, (x1 - x0) * scale, (y1 - y0) * scale, dx, dy, dw, dh);
+    onTile(++i, n);
+  }
+  return out;
+}
+
 async function esrganRun(src, kind, t, opts, label, msg) {
   const m = UP_MODELS[kind], steps = upPlan(t.f, kind, t.enh);
   let cur = src;
@@ -206,6 +249,13 @@ async function esrganRun(src, kind, t, opts, label, msg) {
     if (m.native) {
       msg.textContent = `${label}pass ${k + 1}/${steps.length} · Real-ESRGAN ${steps[k].s}× di GPU native…`;
       cur = await nativePass(cur, m.native, steps[k], opts.tta);
+      continue;
+    }
+    if (m.onnx) {
+      const mdl = await loadOrtModel(m, msg);
+      cur = await onnxPass(cur, mdl, { ...opts, step: steps[k], overlap: m.ov }, (i, n) => {
+        msg.textContent = `${label}pass ${k + 1}/${steps.length} · tile ${i}/${n} · ${Math.round(i / n * 100)}% · ${mdl.ep === 'webgpu' ? 'GPU WebGPU' : 'CPU (lambat)'}`;
+      });
       continue;
     }
     msg.textContent = `Memuat model ${m.name.split(' · ')[1] || kind} ${steps[k].s}×… (pertama kali agak lama)`;
@@ -236,7 +286,7 @@ async function upscaleDialog() {
     const t = upTarget(tSel.value, D.w, D.h);
     modelRow.hidden = t.deblur;
     const isNat = !t.deblur && !!UP_MODELS[lModel.value].native;
-    ganRow.hidden = lModel.value === 'gans' || t.deblur || isNat; // Real-ESRGAN sudah model GAN
+    ganRow.hidden = lModel.value === 'gans' || t.deblur || isNat || !!UP_MODELS[lModel.value].onnx; // Real-ESRGAN sudah model GAN
     tileRow.hidden = isNat; // ncnn mengatur tile sendiri
     strRow.hidden = detRow.hidden = scopeRow.hidden = !t.enh;
     if (t.deblur) {
@@ -264,7 +314,7 @@ async function upscaleDialog() {
   modal('AI Upscale', body, () => {
     const t = upTarget(tSel.value, D.w, D.h);
     if (!t.enh && t.f <= 1.001) { toast('Pilih target yang lebih besar dari gambar sekarang.'); return false; }
-    const opts = { t, layer: t.enh && scopeSel.value === 'layer' ? al : null, sharpen, strength, detail, keep: keepCb.checked, model: t.deblur ? 'maxim' : lModel.value, tile: +lTile.value, tta: +lTta.value, gan: lModel.value === 'gans' || t.deblur || UP_MODELS[lModel.value].native ? 0 : gan };
+    const opts = { t, layer: t.enh && scopeSel.value === 'layer' ? al : null, sharpen, strength, detail, keep: keepCb.checked, model: t.deblur ? 'maxim' : lModel.value, tile: +lTile.value, tta: +lTta.value, gan: lModel.value === 'gans' || t.deblur || UP_MODELS[lModel.value].native || UP_MODELS[lModel.value].onnx ? 0 : gan };
     setTimeout(() => runUpscale(opts), 0);
   }, 'Upscale');
 }
@@ -280,7 +330,7 @@ async function runUpscale(o) {
       const L = o.layer && D.layers.includes(o.layer) ? o.layer : null;
       const src = L ? L.canvas : composite(), alpha = hasAlpha(src);
       if (L) t.w = src.width, t.h = src.height;
-      if (!UP_MODELS[o.model].native || o.gan) { msg.textContent = 'Memuat TensorFlow.js…'; await loadTf(); }
+      if (!(UP_MODELS[o.model].native || UP_MODELS[o.model].onnx) || o.gan) { msg.textContent = 'Memuat TensorFlow.js…'; await loadTf(); }
       const opts = { tile: o.tile, overlap: UP_MODELS[o.model].rrdn ? 24 : 16, tta: o.tta };
       let out = await esrganRun(src, o.model, t, opts, o.gan ? 'Model utama · ' : '', msg);
       if (o.gan) {
