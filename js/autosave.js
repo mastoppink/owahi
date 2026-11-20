@@ -84,7 +84,7 @@ async function autosave() {
     if (!D) { await kvSet('doc', null); }
     else {
       const layers = await Promise.all(D.layers.map(l => pack(l.type === 'text' || l.type === 'smart' ? { ...l, canvas: null } : l)));
-      await kvSet('doc', { v: 1, w: D.w, h: D.h, active: D.active, layers, paths: D.paths || [], pathActive: PS.active, name: S.fileName, t: Date.now() });
+      await kvSet('doc', { v: 1, w: D.w, h: D.h, active: D.active, layers, paths: D.paths || [], pathActive: PS.active, meta: D.meta || null, name: S.fileName, t: Date.now() });
     }
     if (!AS.timer) { AS.dirty = false; setSaveStat(D ? 'Tersimpan otomatis ✓' : '', 'ok'); }
   } catch (e) {
@@ -104,7 +104,7 @@ async function autoRestore() {
       setSaveStat('Memulihkan…', 'pending');
       const layers = await unpack(d.layers);
       for (const l of layers) l.styles = Object.assign(defStyles(), l.styles || {});
-      D = { w: d.w, h: d.h, layers, active: Math.min(d.active || 0, layers.length - 1), paths: d.paths || [] };
+      D = { w: d.w, h: d.h, layers, active: Math.min(d.active || 0, layers.length - 1), paths: d.paths || [], meta: d.meta || newMeta() };
       UID = Math.max(0, ...layers.map(l => l.id || 0)) + 1;
       PUID = Math.max(0, ...D.paths.map(p => p.id || 0)) + 1;
       PS.active = Math.min(d.pathActive ?? -1, D.paths.length - 1); PS.sel = null; PS.drawing = null;

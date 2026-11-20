@@ -26,6 +26,7 @@ Jalankan lokal: `node server.js` lalu buka http://localhost:5173 (server kecil t
 | Brush (dukung tekanan pena), Eraser, Gradient, Teks, Layer Style | Toolbar, panel Properti |
 | **AI Upscale bertile sampai 4K**, **Perjelas** (ukuran tetap), **Hilangkan blur** (MAXIM): Real-ESRGAN/ESRGAN di browser atau native GPU, gambar tidak dikirim ke mana pun | Menu Gambar (Ctrl+Alt+U) |
 | Undo/redo 40 langkah, simpan/buka proyek `.lapis`, export JPG/PNG/WebP | Menu File |
+| **Metadata export** seperti Photoshop: XMP (ID dokumen unik per proyek, riwayat), EXIF, profil sRGB, pembuat & hak cipta otomatis | Dialog Export, Edit → Metadata & hak cipta |
 | **Simpan otomatis**: dokumen tetap ada setelah refresh atau browser ditutup (IndexedDB) | Otomatis; status di kanan atas; File → Tutup dokumen untuk menghapus |
 
 ## Shortcut
@@ -107,6 +108,18 @@ Pesan progres menunjukkan apakah yang dipakai GPU atau CPU. Kalau tertulis "CPU 
 `models/realesr-general-x4v3-fp16.onnx` (~2,4 MB) diekspor dengan cara yang sama dari `realesr-general-x4v3.pth`.
 
 `models/realesrgan-x4plus-fp16.onnx` adalah bobot resmi `RealESRGAN_x4plus.pth` yang diekspor ke ONNX (opset 17, bobot fp16, input/output float32 NCHW 0..1, tinggi/lebar dinamis). Hasilnya praktis sama dengan versi native (selisih ~38 dB PSNR).
+
+## Metadata export
+
+Setiap export JPG/PNG/WebP membawa metadata dengan struktur seperti file Photoshop, sehingga terbaca di Lightroom, Bridge, Photoshop, exiftool, Finder, dan Windows. Bisa dimatikan di dialog Export.
+
+- **XMP:** `xmpMM:DocumentID` (unik per proyek, dibuat saat proyek baru dan ikut tersimpan di `.lapis` & simpanan otomatis), `OriginalDocumentID` (ID foto asal bila ada), `InstanceID` (baru tiap export), `xmpMM:History` (created / converted / saved), tanggal, ukuran, `dc:creator`, `dc:rights`, `dc:title`.
+- **EXIF:** Software, tanggal, Artist, Copyright, resolusi 72 dpi, ruang warna sRGB; tanggal ambil dan kamera dari foto asli dipertahankan.
+- **Profil warna sRGB IEC61966-2.1** (JPG & WebP; PNG memakai chunk `sRGB`).
+- **Penanda AI:** proyek yang memakai AI Upscale/Perjelas/Deblur atau Generative Fill diberi `Iptc4xmpExt:DigitalSourceType = compositeWithTrainedAlgorithmicMedia` (bisa dimatikan).
+- Nama aplikasi tercatat jujur sebagai **Lapis 1.0** (`xmp:CreatorTool`, EXIF Software).
+
+**Pembuat & hak cipta** diisi otomatis dengan prioritas: isian khusus proyek (di dialog Export) → metadata foto asli (EXIF Artist/Copyright, XMP dc:creator/dc:rights) → *Edit → Metadata & hak cipta* (nama + format, default `© {tahun} {nama}`) → kosong (tidak ditulis).
 
 ## Batasan
 

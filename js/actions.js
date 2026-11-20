@@ -13,7 +13,13 @@ async function handleImageFile(f, asLayer) {
   await busy('Membuka…', async () => {
     const img = await fileToImg(f);
     const name = f.name.replace(/\.[^.]+$/, '');
-    if (asLayer && D) addImageLayer(img, name); else openImageAsDoc(img, name);
+    if (asLayer && D) addImageLayer(img, name);
+    else {
+      openImageAsDoc(img, name);
+      // metadata foto asal: pembuat, hak cipta, tanggal & kamera; ID dokumen asal dipertahankan seperti Photoshop
+      const src = await readSrcMeta(f);
+      if (src) { D.meta.src = src; if (src.origId) D.meta.origId = src.origId; }
+    }
   });
 }
 function openImageAsDoc(img, name = 'gambar') {
@@ -55,7 +61,7 @@ function saveProject() {
   if (!D) return;
   busy('Menyimpan proyek…', async () => {
     const layers = D.layers.map(l => ser(l.type === 'text' || l.type === 'smart' ? { ...l, canvas: null } : l));
-    const data = { app: 'lapis', v: 1, w: D.w, h: D.h, active: D.active, layers, paths: D.paths || [] };
+    const data = { app: 'lapis', v: 1, w: D.w, h: D.h, active: D.active, layers, paths: D.paths || [], meta: ensureMeta() };
     download(new Blob([JSON.stringify(data)], { type: 'application/json' }), (S.fileName || 'proyek') + '.lapis');
   });
 }
@@ -71,7 +77,7 @@ function loadProjectFile(f) {
     if (data.app !== 'lapis') throw new Error('Bukan file proyek Lapis');
     const layers = await deser(data.layers);
     for (const l of layers) l.styles = Object.assign(defStyles(), l.styles || {});
-    D = { w: data.w, h: data.h, layers, active: Math.min(data.active || 0, layers.length - 1), paths: data.paths || [] };
+    D = { w: data.w, h: data.h, layers, active: Math.min(data.active || 0, layers.length - 1), paths: data.paths || [], meta: data.meta || newMeta() };
     PUID = Math.max(0, ...D.paths.map(p => p.id || 0)) + 1;
     PS.active = D.paths.length - 1; PS.sel = null; PS.drawing = null;
     UID = Math.max(0, ...layers.map(l => l.id || 0)) + 1;
@@ -85,17 +91,37 @@ function exportDialog() {
   if (!D) return;
   const fmt = el('select', {}, el('option', { value: 'image/jpeg' }, 'JPG'), el('option', { value: 'image/png' }, 'PNG (transparan)'), el('option', { value: 'image/webp' }, 'WebP'));
   let q = 90, sc = 100;
+  // metadata: terisi otomatis (proyek → foto asli → pengaturan), bisa diubah khusus proyek ini
+  const md = metaDefaults(), m = ensureMeta();
+  const mOn = el('input', { type: 'checkbox', checked: true });
+  const mCreator = el('input', { type: 'text', value: md.creator, placeholder: 'kosong = tidak ditulis' });
+  const mRights = el('input', { type: 'text', value: md.rights, placeholder: 'kosong = tidak ditulis' });
+  const mTitle = el('input', { type: 'text', value: md.title, placeholder: 'opsional' });
+  const mAi = el('input', { type: 'checkbox', checked: md.ai });
+  const dirty = new Set();
+  [[mCreator, 'creator'], [mRights, 'rights'], [mTitle, 'title']].forEach(([i, k]) => i.addEventListener('input', () => dirty.add(k)));
+  const mBox = el('div', {}, row('Pembuat', mCreator), row('Hak cipta', mRights), row('Judul', mTitle),
+    m.ai ? el('label', { class: 'chk' }, mAi, 'Tandai diproses AI (IPTC DigitalSourceType)') : '',
+    el('p', { class: 'muted small' }, `ID dokumen: ${m.docId.replace('xmp.did:', '')}. Nama default diatur di Edit → Metadata & hak cipta.`));
+  mOn.addEventListener('change', () => { mBox.hidden = !mOn.checked; });
   const body = el('div', {}, row('Format', fmt),
     slider('Kualitas', q, 10, 100, 1, v => { q = v; }, '%'),
     slider('Skala', sc, 5, 100, 1, v => { sc = v; }, '%'),
-    el('p', { class: 'muted small' }, 'Kualitas hanya berlaku untuk JPG dan WebP.'));
+    el('p', { class: 'muted small' }, 'Kualitas hanya berlaku untuk JPG dan WebP.'),
+    el('label', { class: 'chk' }, mOn, 'Sertakan metadata (XMP, EXIF, profil sRGB)'), mBox);
   modal('Export gambar', body, async () => {
     await busy('Mengekspor…', async () => {
       const comp = composite(), w = Math.max(1, Math.round(D.w * sc / 100)), h = Math.max(1, Math.round(D.h * sc / 100));
       const c = mk(w, h), g = cx(c);
       if (fmt.value === 'image/jpeg') { g.fillStyle = '#fff'; g.fillRect(0, 0, w, h); }
       g.drawImage(w === D.w && h === D.h ? comp : lanczosResize(comp, w, h), 0, 0);
-      const blob = await toBlob(c, fmt.value, q / 100);
+      let blob = await toBlob(c, fmt.value, q / 100);
+      if (mOn.checked) {
+        if (dirty.has('creator')) m.creator = mCreator.value.trim();
+        if (dirty.has('rights')) m.rights = mRights.value.trim();
+        if (dirty.has('title')) m.title = mTitle.value.trim();
+        blob = await embedMeta(blob, fmt.value, w, h, { creator: mCreator.value.trim(), rights: mRights.value.trim(), title: mTitle.value.trim(), ai: m.ai && mAi.checked });
+      }
       download(blob, (S.fileName || 'gambar') + '-edit.' + { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp' }[fmt.value]);
     });
   }, 'Export');

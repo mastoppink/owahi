@@ -44,7 +44,7 @@ function touch(l) { if (l) l.ver++; requestRender(); scheduleAutosave(); }
 function insertLayer(l) { D.layers.splice(D.active + 1, 0, l); D.active++; S.editMask = false; }
 
 function newDoc(w, h, fill, name = 'Latar') {
-  D = { w, h, layers: [], active: 0, paths: [] };
+  D = { w, h, layers: [], active: 0, paths: [], meta: newMeta() };
   PS.active = -1; PS.sel = null; PS.drawing = null;
   const l = newLayer('pixel', name);
   l.canvas = mk(w, h);
@@ -72,6 +72,7 @@ function pushH(label, key) {
   if (key && key === H.key && t - H.t < 1200) { H.t = t; return; } // gabungkan geseran slider beruntun
   H.key = key || null; H.t = t;
   H.past.push({ label, s: snap() });
+  markAI(label);
   if (H.past.length > 40) H.past.shift();
   H.future = [];
   updateUndoBtns();

@@ -446,7 +446,7 @@ const menuDefs = () => [
   ['Edit', [
     ['Undo', undo, 'Ctrl+Z'], ['Redo', redo, 'Ctrl+Shift+Z'], '-',
     ['Free Transform', () => setTool('transform'), 'F'], ['Isi seleksi dengan warna', fillSel, 'Alt+Del'], ['Hapus isi seleksi', clearSel, 'Del'], '-',
-    ['Content-Aware Fill', contentAwareFill, 'Shift+Del'], ['Generative Fill (AI)…', genFillDialog], ['Pengaturan AI…', aiSettings]]],
+    ['Content-Aware Fill', contentAwareFill, 'Shift+Del'], ['Generative Fill (AI)…', genFillDialog], ['Pengaturan AI…', aiSettings], ['Metadata & hak cipta…', metaSettings]]],
   ['Gambar', [
     ['AI Upscale (sampai 4K)…', upscaleDialog, 'Ctrl+Alt+U'], '-', ['Ukuran gambar…', resizeDialog], ['Putar 90° kanan', () => docRotate(90)], ['Putar 90° kiri', () => docRotate(-90)],
     ['Balik horizontal', () => docFlip(true)], ['Balik vertikal', () => docFlip(false)]]],
