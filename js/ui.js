@@ -475,8 +475,12 @@ function renderMenus() {
       dd.append(el('button', { role: 'menuitem', onclick: () => { closeAll(); if (!D && !/baru|Buka/.test(label)) { toast('Buka foto dulu.'); return; } fn(); } }, el('span', {}, label), key ? el('kbd', {}, key) : null));
     }
     const m = el('div', { class: 'menu' });
-    const b = el('button', { 'aria-haspopup': 'true', onclick: e => { e.stopPropagation(); const open = m.classList.contains('open'); closeAll(); if (!open) m.classList.add('open'); } }, title);
-    b.addEventListener('pointerenter', () => { if ($('.menu.open') && !m.classList.contains('open')) { closeAll(); m.classList.add('open'); } });
+    const place = () => { // posisi tetap di layar (wadah menu di HP bisa digeser, dropdown absolut akan terpotong)
+      const r = b.getBoundingClientRect(), w = Math.min(280, innerWidth - 16);
+      Object.assign(dd.style, { position: 'fixed', top: r.bottom + 2 + 'px', left: Math.max(8, Math.min(r.left, innerWidth - w - 8)) + 'px', minWidth: w + 'px', maxHeight: innerHeight - r.bottom - 12 + 'px', overflowY: 'auto' });
+    };
+    const b = el('button', { 'aria-haspopup': 'true', onclick: e => { e.stopPropagation(); const open = m.classList.contains('open'); closeAll(); if (!open) { place(); m.classList.add('open'); } } }, title);
+    b.addEventListener('pointerenter', e => { if (e.pointerType === 'mouse' && $('.menu.open') && !m.classList.contains('open')) { closeAll(); place(); m.classList.add('open'); } });
     m.append(b, dd);
     nav.append(m);
   }

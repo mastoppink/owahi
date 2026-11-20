@@ -16,7 +16,7 @@ html, body { margin: 0; height: 100%; }
 body {
   background: var(--bg); color: var(--text);
   font: 13px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-  display: grid; grid-template-rows: 38px 44px 1fr; height: 100dvh; overflow: hidden;
+  display: grid; grid-template-rows: 38px 44px 1fr; grid-template-columns: minmax(0, 1fr); height: 100dvh; overflow: hidden;
 }
 button, input, select, textarea { font: inherit; color: inherit; }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
@@ -25,7 +25,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .small { font-size: 12px; }
 
 /* Menu bar */
-#menubar { display: flex; align-items: center; gap: 2px; padding: 0 8px; background: var(--panel); border-bottom: 1px solid var(--line); }
+#menubar { min-width: 0; display: flex; align-items: center; gap: 2px; padding: 0 8px; background: var(--panel); border-bottom: 1px solid var(--line); }
 .brand { font-weight: 700; margin-right: 10px; letter-spacing: .3px; }
 #menus { display: flex; gap: 2px; }
 .spacer { flex: 1; }
@@ -161,11 +161,22 @@ details.style summary { cursor: pointer; padding: 2px 0; }
 
 .mobile-only { display: none; }
 @media (max-width: 820px) {
-  #menus { overflow-x: auto; scrollbar-width: none; }
+  #menus { flex: 1 1 auto; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+  #menubar .spacer { display: none; }
   .brand { display: none; }
   main { grid-template-columns: 44px 1fr; }
   .tool { width: 34px; }
   #side { position: fixed; right: 0; top: 82px; bottom: 0; width: min(320px, 90vw); transform: translateX(100%); transition: transform .2s; z-index: 40; box-shadow: -10px 0 30px rgba(0,0,0,.4); }
   body.side-open #side { transform: none; }
   .mobile-only { display: inline-block; }
+  /* iOS Safari memperbesar halaman bila kolom isian < 16px */
+  input[type=text], input[type=number], input[type=url], input[type=password], select, textarea { font-size: 16px; }
+  /* target sentuh lebih besar */
+  .menu > button { padding: 8px 10px; }
+  .dropdown button { padding: 10px 12px; }
+  .btn { padding: 6px 10px; }
+  .icon-btn { width: 38px; height: 34px; }
+  #modal .box { max-height: calc(100dvh - 24px); }
 }
+/* cegah zoom ketuk-ganda di tombol (tanpa jeda 300 ms) */
+button, select, input, label, .layer { touch-action: manipulation; }

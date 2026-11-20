@@ -8,13 +8,52 @@ function evPt(e) {
   const r = view.getBoundingClientRect(), sx = e.clientX - r.left, sy = e.clientY - r.top;
   return { sx, sy, x: (sx - S.panX) / S.zoom, y: (sy - S.panY) / S.zoom, pr: e.pointerType === 'mouse' ? 1 : (e.pressure || 0.5) };
 }
+/* Sentuh: dua jari = geser + pinch zoom (goresan satu jari yang baru dimulai dibatalkan). */
+const touches = new Map();
+let pinch = null;
+function pinchState() {
+  const [a, b] = [...touches.values()], r = view.getBoundingClientRect();
+  return { cx: (a.x + b.x) / 2 - r.left, cy: (a.y + b.y) / 2 - r.top, d: Math.hypot(a.x - b.x, a.y - b.y) || 1 };
+}
+view.addEventListener('pointerdown', e => {
+  if (e.pointerType !== 'touch' || !D) return;
+  touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  if (touches.size === 2) {
+    if (dragTool) { // jari pertama ternyata awal gestur: akhiri alatnya, dan batalkan goresannya bila baru saja dimulai
+      if (dragTool.up) dragTool.up(evPt(e), e);
+      dragTool = null;
+      if (view._hAdded && pinchUndoable()) undo();
+    }
+    pinch = pinchState();
+  }
+}, true);
+view.addEventListener('pointermove', e => {
+  if (!touches.has(e.pointerId)) return;
+  touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  if (pinch && touches.size >= 2) {
+    const p = pinchState();
+    S.panX += p.cx - pinch.cx; S.panY += p.cy - pinch.cy;
+    zoomAt(p.cx, p.cy, p.d / pinch.d);
+    pinch = p; e.stopImmediatePropagation();
+  }
+}, true);
+const touchEnd = e => { touches.delete(e.pointerId); if (touches.size < 2) pinch = null; };
+view.addEventListener('pointerup', touchEnd, true);
+view.addEventListener('pointercancel', touchEnd, true);
+let downAt = 0;
+function pinchUndoable() { return performance.now() - downAt < 400; } // hanya bila goresan baru saja dimulai
+
 view.addEventListener('pointerdown', e => {
   if (!D) return;
   e.preventDefault();
+  if (pinch) return; // jari kedua: gestur, bukan alat
+  downAt = performance.now();
+  const hBefore = H.past.length;
   if (S.pick && e.button === 0) { pickWB(evPt(e)); return; }
   view.setPointerCapture(e.pointerId);
   dragTool = S.spaceDown || e.button === 1 ? TOOLS.hand : e.button === 0 ? TOOLS[S.tool] : null;
   if (dragTool && dragTool.down) dragTool.down(evPt(e), e);
+  view._hAdded = H.past.length > hBefore;
   requestView();
 });
 view.addEventListener('pointermove', e => {
