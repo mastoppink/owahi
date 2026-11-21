@@ -466,7 +466,13 @@ const menuDefs = () => [
 function renderMenus() {
   const nav = $('#menus');
   nav.innerHTML = '';
-  const closeAll = () => $$('.menu.open').forEach(m => m.classList.remove('open'));
+  // Dropdown dipindah ke <body> selama terbuka: Safari iOS memotong elemen (termasuk position:fixed)
+  // di dalam wadah yang bisa digeser, seperti baris menu di HP.
+  let openDd = null;
+  const closeAll = () => {
+    $$('.menu.open').forEach(m => m.classList.toggle('open', false));
+    if (openDd) { openDd.classList.toggle('show', false); openDd._home.append(openDd); openDd = null; }
+  };
   for (const [title, items] of menuDefs()) {
     const dd = el('div', { class: 'dropdown', role: 'menu' });
     for (const it of items) {
@@ -479,12 +485,13 @@ function renderMenus() {
       const r = b.getBoundingClientRect(), w = Math.min(280, innerWidth - 16);
       Object.assign(dd.style, { position: 'fixed', top: r.bottom + 2 + 'px', left: Math.max(8, Math.min(r.left, innerWidth - w - 8)) + 'px', minWidth: w + 'px', maxHeight: innerHeight - r.bottom - 12 + 'px', overflowY: 'auto' });
     };
-    const b = el('button', { 'aria-haspopup': 'true', onclick: e => { e.stopPropagation(); const open = m.classList.contains('open'); closeAll(); if (!open) { place(); m.classList.add('open'); } } }, title);
-    b.addEventListener('pointerenter', e => { if (e.pointerType === 'mouse' && $('.menu.open') && !m.classList.contains('open')) { closeAll(); place(); m.classList.add('open'); } });
-    m.append(b, dd);
+    const show = () => { place(); document.body.append(dd); dd.classList.add('show'); m.classList.add('open'); openDd = dd; };
+    const b = el('button', { 'aria-haspopup': 'true', onclick: e => { e.stopPropagation(); const open = m.classList.contains('open'); closeAll(); if (!open) show(); } }, title);
+    b.addEventListener('pointerenter', e => { if (e.pointerType === 'mouse' && $('.menu.open') && !m.classList.contains('open')) { closeAll(); show(); } });
+    m.append(b, dd); dd._home = m;
     nav.append(m);
   }
-  document.addEventListener('click', e => { if (!e.target.closest('.menu')) closeAll(); });
+  document.addEventListener('click', e => { if (!e.target.closest('.menu, .dropdown')) closeAll(); });
 }
 
 /* ---------- Modal ---------- */
